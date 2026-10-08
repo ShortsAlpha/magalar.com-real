@@ -228,7 +228,9 @@ export function Demo({ labels }: { labels: Labels }) {
         pendingRef.current?.resolve(token);
         pendingRef.current = null;
       },
-      'error-callback': () => {
+      'error-callback': (code?: string) => {
+        // e.g. 110200 = hostname not allowed for this site key (see Cloudflare Turnstile error codes)
+        console.warn('Turnstile error', code);
         pendingRef.current?.reject(new Error('turnstile-error'));
         pendingRef.current = null;
         return true;
