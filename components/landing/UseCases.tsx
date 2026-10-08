@@ -5,7 +5,7 @@ const CASES = [
   {
     icon: Clapperboard,
     title: 'Video voiceovers',
-    body: 'Narration for YouTube, explainers and product films, voiced scene by scene.',
+    body: 'Narration for YouTube, explainers and product films in dozens of languages, with subtitles for every scene.',
   },
   {
     icon: GraduationCap,

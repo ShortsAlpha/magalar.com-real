@@ -62,3 +62,22 @@ export function usePreview() {
 
     return { state, play, stop };
 }
+
+const PREVIEW_TTL_MS = 40 * 60 * 1000;
+const previewCache = new Map<string, { url: string; at: number }>();
+
+/**
+ * Re-uses a preview render for the same voice + text + prosody while its presigned URL is still fresh,
+ * so repeated sample clicks don't re-render (or add duplicate rows to the Library).
+ */
+export async function cachedPreview(key: string, load: () => Promise<string>): Promise<string> {
+    const hit = previewCache.get(key);
+    if (hit && Date.now() - hit.at < PREVIEW_TTL_MS) return hit.url;
+    const url = await load();
+    previewCache.set(key, { url, at: Date.now() });
+    if (previewCache.size > 64) {
+        const oldest = previewCache.keys().next().value;
+        if (oldest !== undefined) previewCache.delete(oldest);
+    }
+    return url;
+}

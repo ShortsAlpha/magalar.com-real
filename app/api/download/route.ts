@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 
 /**
- * Authenticated download proxy for audio rendered by the voice engine.
+ * Authenticated download proxy for renders produced by the voice engine (MP3, SRT/VTT subtitles, DOCX ZIP bundles).
  *
  * The backend uploads to Cloudflare R2 (endpoint `https://<account_id>.r2.cloudflarestorage.com`) and returns a
  * presigned URL. Browsers can't force a download for a cross-origin URL, so we stream it through here with a
@@ -16,7 +16,11 @@ const R2_HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+r2\.cloudflarestora
 const TYPES = {
     mp3: 'audio/mpeg',
     zip: 'application/zip',
+    srt: 'application/x-subrip',
+    vtt: 'text/vtt; charset=utf-8',
 } as const;
+
+type Ext = keyof typeof TYPES;
 
 function parseAllowedUrl(raw: string | null): URL | null {
     if (!raw) return null;
@@ -34,11 +38,12 @@ function parseAllowedUrl(raw: string | null): URL | null {
     return url;
 }
 
-/** ASCII-only, no quotes / CR / LF / path separators, forced .mp3 or .zip extension. */
-function sanitizeFilename(raw: string | null): { name: string; ext: keyof typeof TYPES } {
+/** ASCII-only, no quotes / CR / LF / path separators, forced .mp3 / .zip / .srt / .vtt extension. */
+function sanitizeFilename(raw: string | null): { name: string; ext: Ext } {
     const input = (raw ?? '').normalize('NFKD').replace(/[̀-ͯ]/g, '');
     const base = input.split(/[\\/]/).pop() ?? '';
-    const ext: keyof typeof TYPES = /\.zip\s*$/i.test(base) ? 'zip' : 'mp3';
+    const match = /\.(mp3|zip|srt|vtt)\s*$/i.exec(base);
+    const ext: Ext = match ? (match[1].toLowerCase() as Ext) : 'mp3';
     const stem = base
         .replace(/\.[^.]*$/, '') // drop any extension the caller supplied
         .replace(/[^A-Za-z0-9 ._-]+/g, '_') // strips quotes, CR/LF, control chars, ;, %, etc.

@@ -9,18 +9,66 @@ import { Fragment, useEffect, useRef, useState } from 'react';
    under prefers-reduced-motion.
    -------------------------------------------------------------------------- */
 
-const SCRIPT =
-  'Every great film starts with a voice. Paste your script, choose a narrator and tune the delivery until it sounds right. Magalar splits long text at sentence boundaries, renders every chunk in parallel and stitches the result into one seamless MP3.';
-const WORDS = SCRIPT.split(' ');
-const CHARS = SCRIPT.length.toLocaleString('en-US');
-
+/* One narrator per loop, each reading the same script in their own language. */
 const CAST = [
-  { name: 'Aria', locale: 'en-US', gender: 'Female', style: 'Expressive', speed: 1.0, pitch: 0, volume: 0 },
-  { name: 'Ryan', locale: 'en-GB', gender: 'Male', style: 'British', speed: 1.1, pitch: -4, volume: 10 },
-  { name: 'Natasha', locale: 'en-AU', gender: 'Female', style: 'Aussie', speed: 0.95, pitch: 3, volume: 5 },
-  { name: 'Connor', locale: 'en-IE', gender: 'Male', style: 'Irish', speed: 1.05, pitch: -2, volume: 0 },
-  { name: 'Clara', locale: 'en-CA', gender: 'Female', style: 'Canadian', speed: 1.15, pitch: 6, volume: 15 },
+  {
+    name: 'Aria',
+    locale: 'en-US',
+    gender: 'Female',
+    style: 'English',
+    speed: 1.0,
+    pitch: 0,
+    volume: 0,
+    script:
+      'Every great film starts with a voice. Paste your script, choose a narrator and tune the delivery until it sounds right. Magalar splits long text at sentence boundaries, renders every chunk in parallel and stitches the result into one seamless MP3.',
+  },
+  {
+    name: 'Emel',
+    locale: 'tr-TR',
+    gender: 'Female',
+    style: 'Turkish',
+    speed: 1.05,
+    pitch: -2,
+    volume: 10,
+    script:
+      'Her güçlü film bir sesle başlar. Metninizi yapıştırın, bir anlatıcı seçin ve tonu kulağınıza doğru gelene kadar ayarlayın. Magalar uzun metni cümle sınırlarından böler, her parçayı paralel işler ve sonucu tek bir kusursuz MP3 olarak birleştirir.',
+  },
+  {
+    name: 'Seraphina',
+    locale: 'de-DE',
+    gender: 'Female',
+    style: 'German',
+    speed: 0.95,
+    pitch: 3,
+    volume: 5,
+    script:
+      'Jeder große Film beginnt mit einer Stimme. Fügen Sie Ihr Skript ein, wählen Sie eine Stimme und justieren Sie den Vortrag, bis er stimmt. Magalar teilt lange Texte an Satzgrenzen, vertont alle Teile parallel und fügt sie zu einer nahtlosen MP3 zusammen.',
+  },
+  {
+    name: 'Ahmet',
+    locale: 'tr-TR',
+    gender: 'Male',
+    style: 'Turkish',
+    speed: 1.1,
+    pitch: -4,
+    volume: 0,
+    script:
+      'İyi bir hikâye, doğru sesle hayat bulur. Bölümün tamamını yapıştırın, sesi seçin ve hızı ayarlayın. Magalar metni parçalara ayırır, hepsini aynı anda seslendirir ve altyazılarıyla birlikte tek bir MP3 dosyası olarak teslim eder.',
+  },
+  {
+    name: 'Vivienne',
+    locale: 'fr-FR',
+    gender: 'Female',
+    style: 'French',
+    speed: 1.15,
+    pitch: 6,
+    volume: 15,
+    script:
+      'Chaque grand film commence par une voix. Collez votre script, choisissez une voix et ajustez le débit jusqu’à ce qu’il sonne juste. Magalar découpe les longs textes aux fins de phrase, génère chaque partie en parallèle et assemble un seul MP3 sans couture.',
+  },
 ] as const;
+const WORDS = CAST.map((c) => c.script.split(' '));
+const CHARS = CAST.map((c) => c.script.length.toLocaleString('en-US'));
 
 const N = 12; // chunks
 const T = { gen: 1700, stitch: 4500, play: 5100, done: 10600, end: 12400 } as const;
@@ -97,12 +145,13 @@ const STATIC_ELAPSED = T.play + STATIC_PLAY * (T.done - T.play);
 
 type Snap = { loop: number; phase: Phase; tune: number; chunks: string; lit: number; play: number };
 function toSnap(f: Frame): Snap {
+  const words = WORDS[f.loop % CAST.length].length;
   return {
     loop: f.loop,
     phase: f.phase,
     tune: Math.round(f.tune * 40) / 40,
     chunks: f.chunks.join(''),
-    lit: f.phase === 'play' ? Math.floor(f.play * WORDS.length) : f.phase === 'done' ? WORDS.length : -1,
+    lit: f.phase === 'play' ? Math.floor(f.play * words) : f.phase === 'done' ? words : -1,
     play: Math.floor(f.play * 40) / 40,
   };
 }
@@ -299,13 +348,15 @@ export function HeroConsole() {
     };
   }, []);
 
-  const voice = CAST[snap.loop % CAST.length];
+  const ci = snap.loop % CAST.length;
+  const voice = CAST[ci];
+  const words = WORDS[ci];
   const prev = CAST[(snap.loop + CAST.length - 1) % CAST.length];
   const lerp = (a: number, b: number) => a + (b - a) * snap.tune;
   const speed = lerp(prev.speed, voice.speed);
   const pitch = Math.round(lerp(prev.pitch, voice.pitch));
   const volume = Math.round(lerp(prev.volume, voice.volume));
-  const total = Math.round(WORDS.length / 2.6 / voice.speed);
+  const total = Math.round(words.length / 2.6 / voice.speed);
   const done = snap.chunks.split('').filter((c) => c === 'd').length;
   const inFlight = snap.chunks.split('').filter((c) => c === 'a').length;
 
@@ -332,7 +383,7 @@ export function HeroConsole() {
       className="cs"
       data-phase={snap.phase}
       role="img"
-      aria-label="Animated preview of the Magalar studio: a script is assigned a voice, tuned for speed, pitch and volume, rendered as twelve chunks in parallel, stitched into one MP3 and played back."
+      aria-label="Animated preview of the Magalar studio: a script in English, Turkish, German or French is assigned a voice, tuned for speed, pitch and volume, rendered as twelve chunks in parallel, stitched into one MP3 and played back."
     >
       <div className="cs-bar" aria-hidden="true">
         <span className="cs-lights">
@@ -353,10 +404,15 @@ export function HeroConsole() {
         <div className="cs-script">
           <div className="cs-label">
             <span>Script</span>
-            <span>{CHARS} / 50,000</span>
+            <span>{CHARS[ci]} / 50,000</span>
           </div>
-          <p className="cs-text" data-karaoke={snap.lit >= 0 && snap.phase === 'play' ? '' : undefined}>
-            {WORDS.map((w, i) => (
+          <p
+            className="cs-text"
+            lang={voice.locale}
+            key={ci}
+            data-karaoke={snap.lit >= 0 && snap.phase === 'play' ? '' : undefined}
+          >
+            {words.map((w, i) => (
               <Fragment key={i}>
                 <span className={i < snap.lit ? 'is-lit' : i === snap.lit ? 'is-now' : undefined}>{w}</span>{' '}
               </Fragment>

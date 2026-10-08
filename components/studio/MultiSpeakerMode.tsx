@@ -1,11 +1,16 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import { ArrowDown, ArrowRight, ArrowUp, Check, ChevronDown, Play, Plus, Square, Trash2 } from 'lucide-react';
-import { DEFAULT_VOICE_ID, getVoice, MAX_CHARS, VOICES } from '@/lib/constants';
-import { ApiError, fileStem, NEUTRAL_PROSODY, toApiError, useBackend } from '@/lib/api';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { ArrowDown, ArrowRight, ArrowUp, Play, Plus, Square, Trash2 } from 'lucide-react';
+import { MAX_CHARS } from '@/lib/constants';
+import { DEFAULT_VOICE_ID, previewTextFor, type Voice } from '@/lib/voices';
+import { ApiError, fileStem, NEUTRAL_PROSODY, PREVIEW_MAX_CHARS, toApiError, useBackend } from '@/lib/api';
+import { countChars } from '@/lib/studio-format';
+import { invalidateLibrary } from '@/lib/studio-library';
+import { resolveVoice } from '@/lib/studio-voices';
 import AudioPlayer from './AudioPlayer';
-import { usePreview } from './usePreview';
+import { cachedPreview, usePreview } from './usePreview';
+import { previewKey, VoicePicker } from './VoiceBrowser';
 import {
     ApiErrorNotice,
     buttonClass,
@@ -17,9 +22,8 @@ import {
     MonoLabel,
     Notice,
     PageHeader,
+    SavedToLibrary,
     Spinner,
-    VoiceAvatar,
-    voiceMeta,
 } from './ui';
 
 interface TextBlock {
@@ -30,6 +34,10 @@ interface TextBlock {
 
 interface DialogueRender {
     url: string;
+    srtUrl: string | null;
+    vttUrl: string | null;
+    durationMs: number | null;
+    renderId: string | null;
     signature: string;
     blocks: number;
     voices: number;
@@ -59,7 +67,7 @@ export default function MultiSpeakerMode() {
     const [render, setRender] = useState<DialogueRender | null>(null);
     const textareas = useRef<Map<string, HTMLTextAreaElement>>(new Map());
 
-    const totalChars = useMemo(() => blocks.reduce((n, b) => n + b.text.trim().length, 0), [blocks]);
+    const totalChars = useMemo(() => blocks.reduce((n, b) => n + countChars(b.text.trim()), 0), [blocks]);
     const voiceCount = useMemo(() => new Set(blocks.map((b) => b.voiceId)).size, [blocks]);
     const emptyIds = useMemo(() => new Set(blocks.filter((b) => !b.text.trim()).map((b) => b.id)), [blocks]);
     const overLimit = totalChars > MAX_CHARS;
@@ -113,7 +121,13 @@ export default function MultiSpeakerMode() {
             preview.stop();
             return;
         }
-        const text = block.text.trim();
+        // Previews are unsaved and capped server-side, so long blocks preview their opening.
+        const full = Array.from(block.text.trim());
+        const text =
+            full.length > PREVIEW_MAX_CHARS
+                ? full.slice(0, PREVIEW_MAX_CHARS).join('').replace(/s+S*$/, '')
+                : full.join('');
+        const voice = resolveVoice(block.voiceId);
         if (!text) {
             setBlockErrors((e) => ({ ...e, [block.id]: 'Add some text to preview this block.' }));
             textareas.current.get(block.id)?.focus();
@@ -121,12 +135,48 @@ export default function MultiSpeakerMode() {
         }
         setError(null);
         preview
-            .play(id, async () => (await api.generateSpeech({ text, voice: block.voiceId, ...NEUTRAL_PROSODY })).audioUrl)
+            .play(id, () =>
+                cachedPreview(`${voice.id}|${text}`, async () =>
+                    (
+                        await api.generateSpeech({
+                            text,
+                            voice: voice.id,
+                            ...NEUTRAL_PROSODY,
+                            save: false,
+                        })
+                    ).audioUrl,
+                ),
+            )
             .catch((err) => {
                 const apiErr = toApiError(err);
                 if (apiErr.kind === 'auth') setError(apiErr);
                 else setBlockErrors((e) => ({ ...e, [block.id]: apiErr.message }));
             });
+    };
+
+    /** Sample from the voice picker, read in the voice's own language. */
+    const previewVoice = (voice: Voice) => {
+        const id = previewKey(voice.id);
+        if (preview.state?.id === id) {
+            preview.stop();
+            return;
+        }
+        const sample = previewTextFor(voice);
+        setError(null);
+        preview
+            .play(id, () =>
+                cachedPreview(`${voice.id}|${sample}`, async () =>
+                    (
+                        await api.generateSpeech({
+                            text: sample,
+                            voice: voice.id,
+                            ...NEUTRAL_PROSODY,
+                            save: false,
+                        })
+                    ).audioUrl,
+                ),
+            )
+            .catch((err) => setError(toApiError(err)));
     };
 
     const generate = async () => {
@@ -148,12 +198,17 @@ export default function MultiSpeakerMode() {
             );
             setRender({
                 url: res.audioUrl,
+                srtUrl: res.srtUrl,
+                vttUrl: res.vttUrl,
+                durationMs: res.durationMs,
+                renderId: res.renderId,
                 signature: signatureOf(snapshot),
                 blocks: res.segmentsProcessed || snapshot.length,
                 voices: new Set(snapshot.map((b) => b.voiceId)).size,
-                chars: snapshot.reduce((n, b) => n + b.text.trim().length, 0),
+                chars: snapshot.reduce((n, b) => n + countChars(b.text.trim()), 0),
                 filename: `${fileStem('magalar', 'dialogue', Date.now())}.mp3`,
             });
+            if (res.renderId) invalidateLibrary();
             window.scrollTo({ top: 0, behavior: 'smooth' });
         } catch (err) {
             setError(toApiError(err));
@@ -243,13 +298,19 @@ export default function MultiSpeakerMode() {
 
             {render && (
                 <section aria-label="Rendered dialogue" className="animate-fade-up space-y-3">
-                    <div className="flex items-center justify-between gap-3">
-                        <MonoLabel className="text-neutral-300">Master</MonoLabel>
-                        {stale && <MonoLabel>Edited since render</MonoLabel>}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                            <MonoLabel className="text-neutral-300">Master</MonoLabel>
+                            {stale && <MonoLabel>Edited since render</MonoLabel>}
+                        </div>
+                        <SavedToLibrary renderId={render.renderId} />
                     </div>
                     <AudioPlayer
                         key={render.url}
                         src={render.url}
+                        srtUrl={render.srtUrl}
+                        vttUrl={render.vttUrl}
+                        durationMs={render.durationMs}
                         filename={render.filename}
                         caption={`${render.blocks} blocks · ${render.voices} voices · ${formatCount(render.chars)} chars`}
                     />
@@ -258,7 +319,7 @@ export default function MultiSpeakerMode() {
 
             <ol className="space-y-3">
                 {blocks.map((block, index) => {
-                    const voice = getVoice(block.voiceId);
+                    const voice = resolveVoice(block.voiceId);
                     const previewId = `block:${block.id}`;
                     const isPlaying = preview.state?.id === previewId && preview.state.status === 'playing';
                     const isLoading = preview.state?.id === previewId && preview.state.status === 'loading';
@@ -279,8 +340,10 @@ export default function MultiSpeakerMode() {
                                     <span className="w-6 shrink-0 font-mono text-[11px] tabular-nums text-neutral-500">{n}</span>
                                     <VoicePicker
                                         value={block.voiceId}
-                                        onChange={(voiceId) => updateBlock(block.id, { voiceId })}
+                                        onChange={(v) => updateBlock(block.id, { voiceId: v.id })}
                                         label={`Voice for block ${n}`}
+                                        onPreview={previewVoice}
+                                        previewState={preview.state}
                                     />
                                 </div>
                                 <div className="flex shrink-0 items-center">
@@ -318,6 +381,8 @@ export default function MultiSpeakerMode() {
                                 onChange={(e) => updateBlock(block.id, { text: e.target.value })}
                                 placeholder={`What does ${voice.name} say?`}
                                 rows={3}
+                                dir="auto"
+                                lang={voice.locale}
                                 aria-invalid={!!blockError}
                                 className="block min-h-[96px] w-full resize-y bg-transparent px-4 py-3.5 text-[15px] leading-relaxed text-neutral-100 outline-none [field-sizing:content] placeholder:text-neutral-600"
                             />
@@ -339,7 +404,7 @@ export default function MultiSpeakerMode() {
                                     {isPlaying && <EqBars className="ml-1" />}
                                 </button>
                                 <span className="font-mono text-[11px] tabular-nums text-neutral-500">
-                                    {formatCount(block.text.length)} chars
+                                    {formatCount(countChars(block.text))} chars
                                 </span>
                             </div>
 
@@ -403,111 +468,5 @@ function IconButton({
         >
             {children}
         </button>
-    );
-}
-
-function VoicePicker({ value, onChange, label }: { value: string; onChange: (id: string) => void; label: string }) {
-    const [open, setOpen] = useState(false);
-    const triggerRef = useRef<HTMLButtonElement>(null);
-    const listRef = useRef<HTMLDivElement>(null);
-    const voice = getVoice(value);
-
-    useEffect(() => {
-        if (!open) return;
-        const selected = listRef.current?.querySelector<HTMLButtonElement>('[aria-selected="true"]');
-        selected?.focus();
-        selected?.scrollIntoView({ block: 'nearest' });
-    }, [open]);
-
-    const close = (refocus = true) => {
-        setOpen(false);
-        if (refocus) triggerRef.current?.focus();
-    };
-
-    const onListKey = (e: KeyboardEvent<HTMLDivElement>) => {
-        if (e.key === 'Escape') {
-            e.preventDefault();
-            close();
-            return;
-        }
-        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-            e.preventDefault();
-            const items = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []);
-            const i = items.indexOf(document.activeElement as HTMLButtonElement);
-            const next = items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length];
-            next?.focus();
-        }
-    };
-
-    return (
-        <div className="relative min-w-0">
-            <button
-                ref={triggerRef}
-                type="button"
-                aria-haspopup="listbox"
-                aria-expanded={open}
-                aria-label={`${label}: ${voice.name}`}
-                onClick={() => setOpen((o) => !o)}
-                className={cx(
-                    'flex min-w-0 items-center gap-2.5 rounded-lg py-1 pl-1 pr-2 transition-colors hover:bg-white/[0.05]',
-                    focusRing,
-                    open && 'bg-white/[0.05]',
-                )}
-            >
-                <VoiceAvatar voice={voice} size="sm" />
-                <span className="min-w-0 text-left">
-                    <span className="block truncate text-sm font-medium text-white">{voice.name}</span>
-                    <span className="hidden truncate font-mono text-[10px] uppercase tracking-[0.12em] text-neutral-500 sm:block">
-                        {voiceMeta(voice)}
-                    </span>
-                </span>
-                <ChevronDown
-                    aria-hidden
-                    className={cx('h-3.5 w-3.5 shrink-0 text-neutral-500 transition-transform duration-150', open && 'rotate-180')}
-                />
-            </button>
-
-            {open && (
-                <>
-                    <div className="fixed inset-0 z-30" aria-hidden onClick={() => close(false)} />
-                    <div
-                        ref={listRef}
-                        role="listbox"
-                        aria-label={label}
-                        onKeyDown={onListKey}
-                        className="absolute left-0 top-full z-40 mt-2 max-h-80 w-72 max-w-[calc(100vw-3rem)] origin-top-left animate-scale-in overflow-y-auto rounded-xl border border-white/15 bg-[#0a0a0a] p-1 shadow-[0_16px_48px_rgba(0,0,0,0.6)]"
-                    >
-                        {VOICES.map((v) => {
-                            const selected = v.id === value;
-                            return (
-                                <button
-                                    key={v.id}
-                                    type="button"
-                                    role="option"
-                                    aria-selected={selected}
-                                    onClick={() => {
-                                        onChange(v.id);
-                                        close();
-                                    }}
-                                    className={cx(
-                                        'flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left outline-none transition-colors hover:bg-white/[0.06] focus-visible:bg-white/[0.08]',
-                                        selected && 'bg-white/[0.04]',
-                                    )}
-                                >
-                                    <VoiceAvatar voice={v} size="sm" active={selected} />
-                                    <span className="min-w-0 flex-1">
-                                        <span className="block truncate text-sm text-white">{v.name}</span>
-                                        <span className="block truncate font-mono text-[10px] uppercase tracking-[0.12em] text-neutral-500">
-                                            {voiceMeta(v)}
-                                        </span>
-                                    </span>
-                                    {selected && <Check className="h-3.5 w-3.5 shrink-0 text-white" aria-hidden />}
-                                </button>
-                            );
-                        })}
-                    </div>
-                </>
-            )}
-        </div>
     );
 }

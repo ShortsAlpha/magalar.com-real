@@ -2,9 +2,11 @@
 
 import Link from 'next/link';
 import type { ReactNode } from 'react';
-import { AlertCircle, Check } from 'lucide-react';
-import type { VoiceOption } from '@/lib/constants';
+import { AlertCircle, ArrowUpRight, Check } from 'lucide-react';
+import type { Voice } from '@/lib/voices';
 import type { ApiError } from '@/lib/api';
+import { LIBRARY_HREF } from '@/lib/studio-library';
+import { voiceMetaLine } from '@/lib/studio-voices';
 
 /* ------------------------------------------------------------------ */
 /* Class helpers                                                       */
@@ -128,7 +130,7 @@ export function EqBars({ className }: { className?: string }) {
 /* Voice avatar                                                        */
 /* ------------------------------------------------------------------ */
 
-export function voiceInitials(voice: VoiceOption) {
+export function voiceInitials(voice: Pick<Voice, 'name'>) {
     return voice.name.slice(0, 2).toUpperCase();
 }
 
@@ -138,7 +140,7 @@ export function VoiceAvatar({
     active = false,
     className,
 }: {
-    voice: VoiceOption;
+    voice: Pick<Voice, 'name'>;
     size?: 'sm' | 'md' | 'lg';
     active?: boolean;
     className?: string;
@@ -159,9 +161,8 @@ export function VoiceAvatar({
     );
 }
 
-export function voiceMeta(voice: VoiceOption) {
-    return `${voice.country} · ${voice.gender === 'Female' ? 'F' : 'M'} · ${voice.style}`;
-}
+/** "Turkish (Türkiye) · F" */
+export const voiceMeta = (voice: Voice) => voiceMetaLine(voice);
 
 /* ------------------------------------------------------------------ */
 /* Slider: hairline track + solid fill + invisible native range        */
@@ -241,6 +242,68 @@ export function Slider({
     );
 }
 
+/** Speed / pitch / volume — shared by Single voice and the DOCX Automator. */
+export function ProsodySliders({
+    idPrefix,
+    speed,
+    pitch,
+    volume,
+    onSpeed,
+    onPitch,
+    onVolume,
+    disabled,
+}: {
+    idPrefix: string;
+    speed: number;
+    pitch: number;
+    volume: number;
+    onSpeed: (v: number) => void;
+    onPitch: (v: number) => void;
+    onVolume: (v: number) => void;
+    disabled?: boolean;
+}) {
+    return (
+        <>
+            <Slider
+                id={`${idPrefix}-speed`}
+                label="Speed"
+                min={0.5}
+                max={2}
+                step={0.05}
+                origin={1}
+                value={speed}
+                display={`${speed.toFixed(2)}×`}
+                onChange={onSpeed}
+                disabled={disabled}
+            />
+            <Slider
+                id={`${idPrefix}-pitch`}
+                label="Pitch"
+                min={-50}
+                max={50}
+                step={1}
+                origin={0}
+                value={pitch}
+                display={`${pitch > 0 ? '+' : ''}${pitch} Hz`}
+                onChange={(v) => onPitch(Math.round(v))}
+                disabled={disabled}
+            />
+            <Slider
+                id={`${idPrefix}-volume`}
+                label="Volume"
+                min={-50}
+                max={50}
+                step={1}
+                origin={0}
+                value={volume}
+                display={`${volume > 0 ? '+' : ''}${volume}%`}
+                onChange={(v) => onVolume(Math.round(v))}
+                disabled={disabled}
+            />
+        </>
+    );
+}
+
 /* ------------------------------------------------------------------ */
 /* Notices                                                             */
 /* ------------------------------------------------------------------ */
@@ -270,6 +333,75 @@ export function Notice({
             <div className="min-w-0 flex-1 leading-relaxed">{children}</div>
             {action}
         </div>
+    );
+}
+
+/** Segmented radio control (mono, monochrome). */
+export function Segmented<T extends string>({
+    label,
+    options,
+    value,
+    onChange,
+    hideLabel,
+    size = 'md',
+}: {
+    label: string;
+    options: readonly { value: T; label: ReactNode }[];
+    value: T;
+    onChange: (value: T) => void;
+    hideLabel?: boolean;
+    size?: 'sm' | 'md';
+}) {
+    return (
+        <div role="radiogroup" aria-label={label} className="flex max-w-full items-center gap-3 overflow-x-auto">
+            {!hideLabel && <MonoLabel className="shrink-0">{label}</MonoLabel>}
+            <div className="flex shrink-0 rounded-lg border border-white/10 p-0.5">
+                {options.map((opt) => {
+                    const active = opt.value === value;
+                    return (
+                        <button
+                            key={opt.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            onClick={() => onChange(opt.value)}
+                            className={cx(
+                                'rounded-md font-mono uppercase tracking-[0.1em] transition-colors',
+                                size === 'sm' ? 'h-6 px-2 text-[10px]' : 'h-7 px-2.5 text-[11px]',
+                                focusRing,
+                                active ? 'bg-white text-black' : 'text-neutral-400 hover:text-white',
+                            )}
+                        >
+                            {opt.label}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
+/** "Saved to Library →" — shown after a render only when the backend returned a render id. */
+export function SavedToLibrary({ renderId, className }: { renderId: string | null | undefined; className?: string }) {
+    if (!renderId) return null;
+    return (
+        <Link
+            href={LIBRARY_HREF}
+            className={cx(
+                'group inline-flex animate-fade-in items-center gap-2 rounded-full border border-white/10 py-1.5 pl-2 pr-3 font-mono text-[10px] uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:border-white/25 hover:text-white',
+                focusRing,
+                className,
+            )}
+        >
+            <span className="flex h-4 w-4 items-center justify-center rounded-full bg-white text-black">
+                <Check className="h-2.5 w-2.5" strokeWidth={3} aria-hidden />
+            </span>
+            Saved to Library
+            <ArrowUpRight
+                className="h-3 w-3 transition-transform duration-150 group-hover:-translate-y-px group-hover:translate-x-px"
+                aria-hidden
+            />
+        </Link>
     );
 }
 

@@ -1,7 +1,9 @@
 import Link from 'next/link';
 import { Logo } from '@/components/brand/Logo';
+import { LANGUAGE_COUNT } from '@/lib/voices';
 
 const PRODUCT = [
+  { href: '#try', label: 'Try it' },
   { href: '#features', label: 'Features' },
   { href: '#how-it-works', label: 'How it works' },
   { href: '#voices', label: 'Voices' },
@@ -55,7 +57,7 @@ export function Footer() {
         </p>
         <div className="footer-bottom">
           <span>© 2026 Magalar</span>
-          <span>English neural voices · MP3 · ZIP</span>
+          <span>{LANGUAGE_COUNT} languages · MP3 · SRT · VTT · ZIP</span>
         </div>
       </div>
     </footer>

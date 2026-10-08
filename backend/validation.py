@@ -7,8 +7,13 @@ Error convention (all responses keep the ``{"status": "error", "message": ...}``
     400  invalid input (empty / too long text, bad voice/rate/pitch/volume, bad file type)
     401  missing / invalid Clerk session token            (see auth.py)
     413  request body or uploaded file too large
+    403  /demo: Turnstile verification failed
+    404  /library/{id}: unknown id or another user's render
     422  .docx could be read but contains nothing usable   (/process_docx only)
+    429  /demo: rate limit exceeded (+ ``retry_after`` and ``Retry-After``)
+    502  /demo: synthesis failed
     503  server auth not configured / JWKS unreachable     (see auth.py)
+         library not configured (DATABASE_URL empty), demo not configured
     200  ``status: "error"`` for runtime TTS / storage failures in POST / and
          POST /generate_multi (legacy behaviour, kept for compatibility).
 """
@@ -18,8 +23,9 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError, field_validator, model_validator
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -34,11 +40,16 @@ MAX_DOCX_BYTES = 25 * 1024 * 1024  # POST /process_docx upload size
 MAX_DOCX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024  # zip-bomb guard
 MAX_DOCX_ZIP_ENTRIES = 10_000
 MAX_DOCX_SCRIPT_CHARS = 200_000    # total spoken-script chars TTS'd per document
+MAX_TITLE_CHARS = 120              # optional render title / PATCH /library/{id}
+MAX_DEMO_CHARS = 200               # POST /demo (public)
+MAX_PREVIEW_CHARS = 500            # POST / and /generate_multi with "save": false
+MAX_TURNSTILE_TOKEN_CHARS = 2048   # Cloudflare documents tokens up to 2048 chars
 
 # Raw request-body caps, enforced while streaming (before any parsing).
 MAX_JSON_BODY_BYTES = 1024 * 1024
 MAX_MULTIPART_BODY_BYTES = MAX_DOCX_BYTES + 1024 * 1024  # file + multipart overhead
-BODY_LIMITS_BY_PATH = {"/process_docx": MAX_MULTIPART_BODY_BYTES}
+MAX_DEMO_BODY_BYTES = 16 * 1024
+BODY_LIMITS_BY_PATH = {"/process_docx": MAX_MULTIPART_BODY_BYTES, "/demo": MAX_DEMO_BODY_BYTES}
 
 # Edge neural voice ids, e.g. en-US-AriaNeural, tr-TR-EmelNeural,
 # en-US-AndrewMultilingualNeural, fil-PH-AngeloNeural, zh-CN-liaoning-XiaobeiNeural.
@@ -64,6 +75,18 @@ def _check_voice(v: str) -> str:
     if len(v) > MAX_VOICE_LENGTH or not VOICE_RE.match(v):
         raise ValueError("Invalid voice (expected e.g. 'en-US-AriaNeural')")
     return v
+
+
+def _check_title(v):
+    """Optional title: trimmed, control chars removed, empty -> None, max 120 chars."""
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise ValueError("Invalid title")
+    v = " ".join("".join(ch if ch.isprintable() else " " for ch in v).split())
+    if len(v) > MAX_TITLE_CHARS:
+        raise ValueError(f"Title is too long (max {MAX_TITLE_CHARS} chars)")
+    return v or None
 
 
 def _check_percent(v: str, name: str) -> str:
@@ -109,6 +132,20 @@ class VoiceSettings(BaseModel):
 
 class GenerateRequest(VoiceSettings):
     text: str
+    title: Optional[str] = None
+    # false = preview: no library row, no subtitles, stored under previews/, max 500 chars.
+    save: StrictBool = True
+
+    @model_validator(mode="after")
+    def _preview_cap(self):
+        if not self.save and len(self.text) > MAX_PREVIEW_CHARS:
+            raise ValueError(f"Preview text is too long ({len(self.text)} chars, max {MAX_PREVIEW_CHARS})")
+        return self
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v):
+        return _check_title(v)
 
     @field_validator("text")
     @classmethod
@@ -136,6 +173,13 @@ class MultiSpeakerRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     segments: list[Segment]
+    title: Optional[str] = None
+    save: StrictBool = True
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v):
+        return _check_title(v)
 
     @field_validator("segments", mode="before")
     @classmethod
@@ -153,7 +197,52 @@ class MultiSpeakerRequest(BaseModel):
         total = sum(len(s.text) for s in self.segments)
         if total > MAX_MULTI_TOTAL_CHARS:
             raise ValueError(f"Total text is too long ({total} chars, max {MAX_MULTI_TOTAL_CHARS})")
+        if not self.save and total > MAX_PREVIEW_CHARS:
+            raise ValueError(f"Preview text is too long ({total} chars, max {MAX_PREVIEW_CHARS})")
         return self
+
+
+class LibraryPatch(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    title: str
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _title(cls, v):
+        v = _check_title(v)
+        if not v:
+            raise ValueError("Title must not be empty")
+        return v
+
+
+class DemoRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    text: str
+    voice: str
+    turnstile_token: str
+
+    @field_validator("text")
+    @classmethod
+    def _text(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("No text provided")
+        if len(v) > MAX_DEMO_CHARS:
+            raise ValueError(f"Text is too long ({len(v)} chars, max {MAX_DEMO_CHARS})")
+        return v
+
+    @field_validator("voice")
+    @classmethod
+    def _voice(cls, v: str) -> str:
+        return _check_voice(v)
+
+    @field_validator("turnstile_token")
+    @classmethod
+    def _token(cls, v: str) -> str:
+        if not v or len(v) > MAX_TURNSTILE_TOKEN_CHARS:
+            raise ValueError("Missing or invalid verification token")
+        return v
 
 
 def format_validation_error(e: ValidationError) -> str:

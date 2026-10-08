@@ -6,7 +6,7 @@ import { AudioLines, Check, FileArchive, FileUp, Image as ImageIcon, ListTree } 
 const NODES = [
   { icon: FileUp, title: 'Upload .docx', detail: 'One file or a batch' },
   { icon: ListTree, title: 'Parse scenes', detail: '“Scene N” · “Spoken script:”' },
-  { icon: AudioLines, title: 'Voice every scene', detail: '01.mp3, 02.mp3 …' },
+  { icon: AudioLines, title: 'Voice every scene', detail: '01.mp3 · 01.srt · 01.vtt' },
   { icon: ImageIcon, title: 'Extract images', detail: '01_1.png, 03_1.png …' },
   { icon: FileArchive, title: 'Download ZIP', detail: 'One ZIP per document' },
 ];
@@ -14,7 +14,7 @@ const NODES = [
 const STATUS = [
   'Queued · module-01.docx, module-02.docx, module-03.docx',
   'Parsing module-01.docx · scenes found',
-  'Voicing each scene as a numbered MP3',
+  'Voicing each scene as a numbered MP3 with subtitles',
   'Extracting embedded images per scene',
   'module-01.zip ready · module-02.docx up next',
 ];

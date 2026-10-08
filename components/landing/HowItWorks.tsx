@@ -5,6 +5,7 @@ import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { useGSAP } from '@gsap/react';
 import { ArrowRight, Check, Download, Play } from 'lucide-react';
+import { LANGUAGE_COUNT, VOICE_COUNT } from '@/lib/voices';
 import { AuthCta } from './AuthCta';
 import { Eyebrow, Split } from './Split';
 
@@ -39,10 +40,10 @@ function VWrite() {
 
 function VVoice() {
   const rows = [
-    { n: 'Aria', m: 'en-US · Expressive' },
-    { n: 'Sonia', m: 'en-GB · British', on: true },
-    { n: 'Liam', m: 'en-CA · Canadian' },
-    { n: 'Emily', m: 'en-IE · Irish' },
+    { n: 'Emel', m: 'tr-TR · Turkish' },
+    { n: 'Sonia', m: 'en-GB · English', on: true },
+    { n: 'Seraphina', m: 'de-DE · Multilingual' },
+    { n: 'Nanami', m: 'ja-JP · Japanese' },
   ];
   return (
     <ul className="vg vg-voice" aria-hidden="true">
@@ -95,7 +96,7 @@ function VGenerate() {
         <span className="vg-btn">
           <Check size={14} strokeWidth={2} /> Generated
         </span>
-        <span>12/12 chunks</span>
+        <span>MP3 · SRT · VTT</span>
       </div>
       <div className="vg-wave">
         {BARS.map((h, i) => (
@@ -134,7 +135,7 @@ const STEPS = [
         Pick a <em>voice</em>
       </>
     ),
-    body: 'Choose from 23 English neural voices across five accents, and preview any of them before you commit.',
+    body: `Choose from ${VOICE_COUNT} neural voices in ${LANGUAGE_COUNT} languages, and preview any of them before you commit.`,
     Art: VVoice,
   },
   {
@@ -152,7 +153,7 @@ const STEPS = [
         Generate &amp; <em>download</em>
       </>
     ),
-    body: 'Render, listen in the browser and download a clean MP3. Long scripts are chunked, rendered in parallel and stitched.',
+    body: 'Render, listen in the browser and download a clean MP3 with SRT and VTT subtitles. Every render is saved to your library.',
     Art: VGenerate,
   },
 ];

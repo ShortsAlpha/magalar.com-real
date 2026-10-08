@@ -1,45 +1,71 @@
-import os
+import asyncio
 import io
+import os
+import re
+import tempfile
 import uuid
+import zipfile
+from contextlib import asynccontextmanager
+from urllib.parse import quote
+
 import boto3
 import modal
-import asyncio
-import edge_tts
-import zipfile
 from docx import Document
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import ValidationError
+from starlette.background import BackgroundTask
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Local modules (shipped into the container via add_local_python_source below).
 from auth import AuthError, get_allowed_origins, require_user
+from demo import (
+    DEMO_DICT_NAME,
+    ModalDictStore,
+    RateLimiter,
+    client_ip,
+    turnstile_secret,
+    verify_turnstile,
+)
+from library import KINDS, MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE, get_library, legacy_keys, parse_cursor, render_keys
+from synth import NothingToSpeak, Render, pieces_for_text, render_pieces, synthesize_plain
+from textproc import default_title, language_of_voice
 from validation import (
     MAX_DOCX_BYTES,
     MAX_DOCX_SCRIPT_CHARS,
+    MAX_TITLE_CHARS,
     ApiError,
     BodySizeLimitMiddleware,
+    DemoRequest,
     GenerateRequest,
+    LibraryPatch,
     MultiSpeakerRequest,
+    VoiceSettings,
+    format_validation_error,
     parse_json_body,
     validate_docx_upload,
 )
+
+LOCAL_MODULES = ("auth", "validation", "textproc", "mp3util", "subtitles", "synth", "library", "demo")
 
 # Define the Modal image with necessary dependencies.
 # (No ffmpeg: MP3 chunks are concatenated byte-wise, nothing shells out to ffmpeg.)
 image = (
     modal.Image.debian_slim()
     .pip_install(
-        "edge-tts",
+        "edge-tts==7.2.8",  # pinned: WordBoundary API + CBR offset handling verified against 7.2.8
         "boto3",
         "fastapi",
         "python-docx",
         "python-multipart",
         "pyjwt[crypto]>=2.8,<3",
+        "asyncpg>=0.30,<1",
+        "httpx==0.28.1",
     )
-    .add_local_python_source("auth", "validation")
+    .add_local_python_source(*LOCAL_MODULES)
 )
 
 # NOTE: app name + function name determine the public URL
@@ -52,8 +78,38 @@ r2_secret = modal.Secret.from_name(
     required_keys=["R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID"],
 )
 clerk_secret = modal.Secret.from_name("magalar-clerk", required_keys=["CLERK_ISSUER"])
+# DATABASE_URL may be empty (library off). TURNSTILE_SECRET_KEY missing -> /demo answers 503.
+db_secret = modal.Secret.from_name("magalar-db")
+turnstile_modal_secret = modal.Secret.from_name("magalar-turnstile")
 
-web_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+PRESIGN_TTL_S = 3600
+SRT_CONTENT_TYPE = "application/x-subrip; charset=utf-8"
+VTT_CONTENT_TYPE = "text/vtt; charset=utf-8"
+DOCX_SCENE_PARALLEL = 5
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Create the library table in the background so cold starts are not slowed down
+    # by a Neon wake-up. Requests that need the DB wait on the same pool lock.
+    task = None
+    lib = get_library()
+    if lib is not None:
+
+        async def _init():
+            try:
+                await asyncio.wait_for(lib.startup(), timeout=30)
+                print("Library ready")
+            except Exception as e:  # noqa: BLE001 - retried lazily on first use
+                print(f"Library startup failed (will retry lazily): {type(e).__name__}")
+
+        task = asyncio.create_task(_init())
+    yield
+    if task is not None and not task.done():
+        task.cancel()
+
+
+web_app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
 
 # Order matters: the last middleware added is the outermost. CORS must wrap the
 # body-size limiter so 413 responses still carry CORS headers.
@@ -62,9 +118,9 @@ web_app.add_middleware(
     CORSMiddleware,
     allow_origins=get_allowed_origins(),
     allow_credentials=False,  # Bearer header auth, no cookies
-    allow_methods=["POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "X-Render-Id", "Retry-After"],
     max_age=600,
 )
 
@@ -96,236 +152,251 @@ async def _validation_error_handler(request: Request, exc: RequestValidationErro
     return _error(400, "Invalid request")
 
 
-def split_text_into_chunks(text: str, max_chars: int = 2000) -> list[str]:
-    """
-    Splits text into chunks respecting sentence boundaries.
-    """
-    if len(text) <= max_chars:
-        return [text]
+# ---------------------------------------------------------------------------
+# R2 helpers
+# ---------------------------------------------------------------------------
+_s3_client = None
 
-    chunks = []
-    current_chunk = ""
 
-    # Simple splitting by sentence endings
-    # replacing newlines with spaces to avoid weird breaks unless double newline
-    paragraphs = text.replace("\r\n", "\n").split("\n")
+def get_s3():
+    global _s3_client
+    if _s3_client is None:
+        from botocore.config import Config
 
-    for para in paragraphs:
-        if not para.strip():
-            continue
+        _s3_client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+            config=Config(signature_version="s3v4"),
+        )
+    return _s3_client
 
-        sentences = para.replace(". ", ".|").replace("? ", "?|").replace("! ", "!|").split("|")
 
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
+def _bucket() -> str:
+    return os.environ["R2_BUCKET_NAME"]
 
-            # If a single sentence is huge (unlikely but possible), split it blindly
-            if len(sentence) > max_chars:
-                # Should handle this edge case, but for now let's hope sentences aren't 2000 chars
-                # If they are, just force add them and let Edge TTS try or error
-                pass
 
-            if len(current_chunk) + len(sentence) + 1 <= max_chars:
-                current_chunk += sentence + " "
-            else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = sentence + " "
+def _put_bytes(key: str, body: bytes, content_type: str) -> None:
+    get_s3().upload_fileobj(io.BytesIO(body), _bucket(), key, ExtraArgs={"ContentType": content_type})
 
-    if current_chunk:
-        chunks.append(current_chunk.strip())
 
-    return chunks
+def _put_file(path: str, key: str, content_type: str) -> None:
+    with open(path, "rb") as f:
+        get_s3().upload_fileobj(f, _bucket(), key, ExtraArgs={"ContentType": content_type})
 
+
+def _delete_keys(keys: list[str]) -> None:
+    if not keys:
+        return
+    resp = get_s3().delete_objects(
+        Bucket=_bucket(), Delete={"Objects": [{"Key": k} for k in keys], "Quiet": True}
+    )
+    errors = (resp or {}).get("Errors") or []
+    if errors:
+        raise RuntimeError(f"R2 delete failed for {len(errors)} object(s)")
+
+
+def presign(key: str | None) -> str | None:
+    if not key:
+        return None
+    return get_s3().generate_presigned_url(
+        "get_object", Params={"Bucket": _bucket(), "Key": key}, ExpiresIn=PRESIGN_TTL_S
+    )
+
+
+# ---------------------------------------------------------------------------
+# Render storage + library rows
+# ---------------------------------------------------------------------------
+async def _library_insert(lib, row: dict) -> str | None:
+    """Insert a library row. Never raises: a library failure must not fail a render."""
+    try:
+        await asyncio.wait_for(lib.insert(row), timeout=20)
+        return row["id"]
+    except Exception as e:  # noqa: BLE001
+        print(f"[user={row['user_id']}] Library insert failed: {type(e).__name__}")
+        return None
+
+
+async def _store_render(
+    user_id: str,
+    kind: str,
+    render: Render,
+    *,
+    title: str,
+    voices: list[str],
+    chars: int,
+    legacy_prefix: str = "",
+) -> dict:
+    """Upload mp3/srt/vtt, record the render in the library, return the URL payload."""
+    srt = render.srt.encode("utf-8")
+    vtt = render.vtt.encode("utf-8")
+    lib = get_library()
+    render_id = str(uuid.uuid4())
+    keys = render_keys(user_id, render_id) if lib else legacy_keys(render_id, legacy_prefix)
+
+    await asyncio.gather(
+        asyncio.to_thread(_put_bytes, keys["audio_key"], render.audio, "audio/mpeg"),
+        asyncio.to_thread(_put_bytes, keys["srt_key"], srt, SRT_CONTENT_TYPE),
+        asyncio.to_thread(_put_bytes, keys["vtt_key"], vtt, VTT_CONTENT_TYPE),
+    )
+
+    stored_id = None
+    if lib is not None:
+        stored_id = await _library_insert(
+            lib,
+            {
+                "id": render_id,
+                "user_id": user_id,
+                "kind": kind,
+                "title": title,
+                "voice": voices[0] if voices else None,
+                "voices": voices,
+                "language": language_of_voice(voices[0]) if voices else None,
+                "chars": chars,
+                "duration_ms": render.duration_ms,
+                "scenes": None,
+                "audio_key": keys["audio_key"],
+                "srt_key": keys["srt_key"],
+                "vtt_key": keys["vtt_key"],
+                "zip_key": None,
+                "size_bytes": len(render.audio) + len(srt) + len(vtt),
+            },
+        )
+
+    return {
+        "render_id": stored_id,
+        "audio_url": presign(keys["audio_key"]),
+        "srt_url": presign(keys["srt_key"]),
+        "vtt_url": presign(keys["vtt_key"]),
+        "duration_ms": render.duration_ms,
+    }
+
+
+async def _store_preview(render: Render) -> dict:
+    """``save: false``: MP3 only, under previews/ (no library row, no subtitles)."""
+    key = f"previews/{uuid.uuid4()}.mp3"
+    await asyncio.to_thread(_put_bytes, key, render.audio, "audio/mpeg")
+    return {
+        "render_id": None,
+        "audio_url": presign(key),
+        "srt_url": None,
+        "vtt_url": None,
+        "duration_ms": render.duration_ms,
+    }
+
+
+def _unique(seq) -> list:
+    seen, out = set(), []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Render endpoints (authenticated)
+# ---------------------------------------------------------------------------
 @web_app.post("/generate_multi")
 async def generate_multi_speech_endpoint(request: Request, user_id: str = Depends(require_user)):
     """
     Generates audio for multiple segments and stitches them together.
-    Body: {"segments": [{"text", "voice", "rate", "pitch", "volume"}, ...]}
+    Body: {"segments": [{"text", "voice", "rate", "pitch", "volume"}, ...], "title"?}
     """
     # Body is read only after authentication succeeded.
     item = await parse_json_body(request, MultiSpeakerRequest)
     segments = item.segments
 
     total_chars = sum(len(s.text) for s in segments)
-    print(f"[user={user_id}] /generate_multi: {len(segments)} segments, {total_chars} chars")
+    print(f"[user={user_id}] /generate_multi: {len(segments)} segments, {total_chars} chars | save={item.save}")
+
+    pieces = []
+    segments_with_audio = 0
+    for seg in segments:
+        seg_pieces = pieces_for_text(seg.text, seg.voice, seg.rate, seg.pitch, seg.volume)
+        if seg_pieces:
+            segments_with_audio += 1
+            pieces.extend(seg_pieces)
+    if not pieces:
+        raise ApiError(400, "Segments contain nothing to speak")
 
     try:
-        file_id = str(uuid.uuid4())
-        final_mp3_path = f"/tmp/{file_id}.mp3"
-
-        # We process segments sequentially to maintain order and simplicity in filenames,
-        # but we can parallelize the GENERATION of each segment.
-
-        # 1. Prepare tasks
-        segment_files = [f"/tmp/{file_id}_seg_{i}.mp3" for i in range(len(segments))]
-
-        async def generate_segment(segment, index):
-            try:
-                # Empty segments are rejected by validation; keep the guard anyway.
-                if not segment.text.strip():
-                    return
-
-                communicate = edge_tts.Communicate(
-                    segment.text,
-                    segment.voice,
-                    rate=segment.rate,
-                    pitch=segment.pitch,
-                    volume=segment.volume
-                )
-                await communicate.save(segment_files[index])
-            except Exception as e:
-                print(f"Error generating segment {index}: {e}")
-                raise e
-
-        # 2. Run in parallel
-        await asyncio.gather(*(generate_segment(seg, i) for i, seg in enumerate(segments)))
-
-        # 3. Merge files
-        # Only merge files that actually exist (in case of skips/errors)
-        valid_files = [f for f in segment_files if os.path.exists(f)]
-
-        if not valid_files:
-             return {"status": "error", "message": "No audio generated from segments"}
-
-        with open(final_mp3_path, "wb") as outfile:
-            for seg_path in valid_files:
-                with open(seg_path, "rb") as infile:
-                    outfile.write(infile.read())
-                os.remove(seg_path)
-
-        # 4. Upload to R2
-        from botocore.config import Config
-        s3 = boto3.client('s3',
-            endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
-            aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
-            aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],
-            config=Config(signature_version='s3v4')
+        render = await render_pieces(pieces)
+        stored = await _store_preview(render) if not item.save else await _store_render(
+            user_id,
+            "dialogue",
+            render,
+            title=item.title or default_title(" ".join(s.text for s in segments)),
+            voices=_unique(s.voice for s in segments),
+            chars=total_chars,
+            legacy_prefix="multi_",
         )
-
-        r2_key = f"generated/multi_{file_id}.mp3"
-
-        with open(final_mp3_path, "rb") as f:
-            s3.upload_fileobj(
-                f,
-                os.environ['R2_BUCKET_NAME'],
-                r2_key,
-                ExtraArgs={'ContentType': 'audio/mpeg'}
-            )
-
-        os.remove(final_mp3_path)
-
-        # 5. Get URL
-        audio_url = s3.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': os.environ['R2_BUCKET_NAME'], 'Key': r2_key},
-            ExpiresIn=3600
-        )
-
-        return {
-            "status": "success",
-            "audio_url": audio_url,
-            "segments_processed": len(valid_files)
-        }
-
     except Exception as e:
         # Details go to the server log only; clients get a generic message.
         print(f"[user={user_id}] Error in multi-gen: {type(e).__name__}: {e}")
         return {"status": "error", "message": "Audio generation failed"}
 
+    print(f"[user={user_id}] /generate_multi done: {len(pieces)} chunks, {stored['duration_ms']} ms")
+    return {"status": "success", **stored, "segments_processed": segments_with_audio}
+
+
 @web_app.post("/")
 async def generate_speech_endpoint(request: Request, user_id: str = Depends(require_user)):
     """
-    Receives JSON: {"text": "...", "voice": "...", ...}
-    Returns JSON: {"status": "success", "audio_url": "..."}
+    Receives JSON: {"text": "...", "voice": "...", ..., "title"?, "save"?: bool = true}
+    save=false -> preview: MP3 only under previews/, srt_url/vtt_url null, render_id null, max 500 chars.
+    Returns JSON: {"status": "success", "render_id", "audio_url", "srt_url", "vtt_url", "duration_ms", "chunks_processed"}
     """
     # Body is read only after authentication succeeded.
     item = await parse_json_body(request, GenerateRequest)
-    text = item.text
-    voice = item.voice
-    rate = item.rate
-    pitch = item.pitch
-    volume = item.volume
+    print(f"[user={user_id}] /: {len(item.text)} chars | Voice: {item.voice} | Rate: {item.rate} | save={item.save}")
 
-    print(f"[user={user_id}] /: {len(text)} chars | Voice: {voice} | Rate: {rate}")
+    pieces = pieces_for_text(item.text, item.voice, item.rate, item.pitch, item.volume)
+    if not pieces:
+        raise ApiError(400, "Text contains nothing to speak")
 
     try:
-        chunks = split_text_into_chunks(text)
-        print(f"Split into {len(chunks)} chunks.")
-
-        # Determine unique ID for the final file
-        file_id = str(uuid.uuid4())
-        final_mp3_path = f"/tmp/{file_id}.mp3"
-
-        # temporary list of chunk files
-        chunk_files = [f"/tmp/{file_id}_part_{i}.mp3" for i in range(len(chunks))]
-
-        async def generate_chunk(chunk_text, index):
-            try:
-                c = edge_tts.Communicate(chunk_text, voice, rate=rate, pitch=pitch, volume=volume)
-                await c.save(chunk_files[index])
-            except Exception as e:
-                print(f"Error generating chunk {index}: {e}")
-                raise e
-
-        # Run all chunks in parallel
-        await asyncio.gather(*(generate_chunk(chunk, i) for i, chunk in enumerate(chunks)))
-
-        # Merge chunks safely
-        # We can just concatenate MP3 bytes for a simple merge
-        with open(final_mp3_path, "wb") as outfile:
-            for chunk_path in chunk_files:
-                with open(chunk_path, "rb") as infile:
-                    outfile.write(infile.read())
-                # cleanup chunk
-                os.remove(chunk_path)
-
-        # Upload to R2
-        from botocore.config import Config
-        s3 = boto3.client('s3',
-            endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
-            aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
-            aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],
-            config=Config(signature_version='s3v4')
+        render = await render_pieces(pieces)
+        stored = await _store_preview(render) if not item.save else await _store_render(
+            user_id,
+            "single",
+            render,
+            title=item.title or default_title(item.text),
+            voices=[item.voice],
+            chars=len(item.text),
         )
-
-        r2_key = f"generated/{file_id}.mp3"
-
-        with open(final_mp3_path, "rb") as f:
-            s3.upload_fileobj(
-                f,
-                os.environ['R2_BUCKET_NAME'],
-                r2_key,
-                ExtraArgs={'ContentType': 'audio/mpeg'}
-            )
-
-        # Cleanup final file
-        os.remove(final_mp3_path)
-
-        # Generate Presigned URL
-        audio_url = s3.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': os.environ['R2_BUCKET_NAME'], 'Key': r2_key},
-            ExpiresIn=3600
-        )
-
-        return {
-            "status": "success",
-            "audio_url": audio_url,
-            "chunks_processed": len(chunks)
-        }
-
     except Exception as e:
         # Details go to the server log only; clients get a generic message.
         print(f"[user={user_id}] Error: {type(e).__name__}: {e}")
         return {"status": "error", "message": "Audio generation failed"}
 
+    print(f"[user={user_id}] / done: {len(pieces)} chunks, {stored['duration_ms']} ms")
+    return {"status": "success", **stored, "chunks_processed": len(pieces)}
+
+
+def _docx_names(filename: str) -> tuple[str, str]:
+    """(display/title name, Content-Disposition value) for an uploaded .docx name."""
+    base = re.split(r"[\\/]", filename)[-1]
+    stem = base[:-5] if base.lower().endswith(".docx") else base
+    stem = " ".join("".join(ch if ch.isprintable() else " " for ch in stem).split()) or "course_assets"
+    ascii_name = re.sub(r"[^A-Za-z0-9._ -]", "_", stem).strip(" .") or "course_assets"
+    disposition = f"attachment; filename=\"{ascii_name}.zip\"; filename*=UTF-8''{quote(stem + '.zip', safe='')}"
+    return stem[:MAX_TITLE_CHARS], disposition
+
+
+def _safe_remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 @web_app.post("/process_docx")
 async def process_docx_endpoint(request: Request, user_id: str = Depends(require_user)):
     """
-    Multipart upload with field `file` (.docx). Returns course_assets.zip.
+    Multipart upload with field `file` (.docx) and optional `voice`, `rate`, `pitch`, `volume`.
+    Returns a zip with NN.mp3 / NN.srt / NN.vtt per scene plus images NN_k.ext.
     """
     # Multipart body is parsed only after authentication succeeded.
     form = await request.form(max_files=1, max_fields=10)
@@ -337,11 +408,20 @@ async def process_docx_endpoint(request: Request, user_id: str = Depends(require
         if not filename.lower().endswith(".docx"):
             raise ApiError(400, "Only .docx files are supported")
         content = await upload.read(MAX_DOCX_BYTES + 1)
+        raw_settings = {}
+        for name in ("voice", "rate", "pitch", "volume"):
+            value = form.get(name)
+            if isinstance(value, str) and value.strip():
+                raw_settings[name] = value.strip()
     finally:
         await form.close()
 
     validate_docx_upload(filename, content)
-    print(f"[user={user_id}] /process_docx: {len(content)} bytes")
+    try:
+        settings = VoiceSettings.model_validate(raw_settings)
+    except ValidationError as e:
+        raise ApiError(400, format_validation_error(e))
+    print(f"[user={user_id}] /process_docx: {len(content)} bytes | Voice: {settings.voice}")
 
     file_stream = io.BytesIO(content)
 
@@ -409,61 +489,264 @@ async def process_docx_endpoint(request: Request, user_id: str = Depends(require
             f"Document script is too long ({total_script_chars} chars, max {MAX_DOCX_SCRIPT_CHARS})",
         )
     print(f"[user={user_id}] /process_docx: {len(scenes)} scenes, {total_script_chars} script chars")
+    del doc, file_stream, content
 
-    sem = asyncio.Semaphore(5)
+    sem = asyncio.Semaphore(DOCX_SCENE_PARALLEL)
 
-    async def generate_tts_for_scene(scene):
-        script = scene["script"].strip()
-        filename = f"{scene['id']}.mp3"
-        chunks = split_text_into_chunks(script)
-        audio_bytes = b""
+    async def render_scene(scene):
+        pieces = pieces_for_text(scene["script"], settings.voice, settings.rate, settings.pitch, settings.volume)
+        if not pieces:
+            return scene["id"], None
+        try:
+            return scene["id"], await render_pieces(pieces, sem=sem)
+        except Exception as e:  # noqa: BLE001 - a failed scene is skipped, as before
+            print(f"[user={user_id}] Error generating TTS for scene {scene['id']}: {type(e).__name__}: {e}")
+            return scene["id"], None
 
-        for chunk in chunks:
-            async with sem:
-                communicate = edge_tts.Communicate(chunk, "en-US-AriaNeural")
-                async for data in communicate.stream():
-                    if data["type"] == "audio":
-                        audio_bytes += data["data"]
-        return filename, audio_bytes
+    # The zip is written to a temp file (not memory): scene audio is added as soon as
+    # each scene finishes and then dropped, the file is uploaded to R2 and streamed
+    # back from disk, then deleted.
+    fd, zip_path = tempfile.mkstemp(prefix="magalar_", suffix=".zip")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(zip_path, "w") as zip_file:
+            for scene in scenes:
+                for img_idx, img_bytes in enumerate(scene["images"]):
+                    ext = ".png"
+                    if img_bytes.startswith(b'\xff\xd8'):
+                        ext = ".jpg"
+                    img_name = f"{scene['id']}_{img_idx + 1}{ext}"
+                    zip_file.writestr(img_name, img_bytes, compress_type=zipfile.ZIP_STORED)
+                scene["images"] = []
 
-    tts_tasks = []
-    for scene in scenes:
-        if scene["script"].strip():
-            tts_tasks.append(generate_tts_for_scene(scene))
+            for next_done in asyncio.as_completed([render_scene(s) for s in scenes if s["script"].strip()]):
+                scene_id, render = await next_done
+                if render is None or not render.audio:
+                    continue
+                zip_file.writestr(f"{scene_id}.mp3", render.audio, compress_type=zipfile.ZIP_STORED)
+                zip_file.writestr(f"{scene_id}.srt", render.srt.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+                zip_file.writestr(f"{scene_id}.vtt", render.vtt.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+    except BaseException:
+        _safe_remove(zip_path)
+        raise
 
-    tts_results = await asyncio.gather(*tts_tasks, return_exceptions=True)
+    title, disposition = _docx_names(filename)
+    render_id = None
+    lib = get_library()
+    if lib is not None:
+        new_id = str(uuid.uuid4())
+        zip_key = render_keys(user_id, new_id)["zip_key"]
+        try:
+            await asyncio.to_thread(_put_file, zip_path, zip_key, "application/zip")
+            render_id = await _library_insert(
+                lib,
+                {
+                    "id": new_id,
+                    "user_id": user_id,
+                    "kind": "docx",
+                    "title": title,
+                    "voice": settings.voice,
+                    "voices": [settings.voice],
+                    "language": language_of_voice(settings.voice),
+                    "chars": total_script_chars,
+                    "duration_ms": None,
+                    "scenes": len(scenes),
+                    "audio_key": None,
+                    "srt_key": None,
+                    "vtt_key": None,
+                    "zip_key": zip_key,
+                    "size_bytes": os.path.getsize(zip_path),
+                },
+            )
+        except Exception as e:  # noqa: BLE001 - the user still gets the zip
+            print(f"[user={user_id}] Storing docx zip failed: {type(e).__name__}")
 
-    # Filter out exceptions from results
-    valid_tts_results = []
-    for res in tts_results:
-        if isinstance(res, Exception):
-            print(f"Error generating TTS for scene: {res}")
-        else:
-            valid_tts_results.append(res)
-
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for scene in scenes:
-            for img_idx, img_bytes in enumerate(scene["images"]):
-                ext = ".png"
-                if img_bytes.startswith(b'\xff\xd8'):
-                    ext = ".jpg"
-                img_name = f"{scene['id']}_{img_idx + 1}{ext}"
-                zip_file.writestr(img_name, img_bytes)
-
-        for filename, audio_bytes in valid_tts_results:
-            if audio_bytes:
-                zip_file.writestr(filename, audio_bytes)
-
-    zip_buffer.seek(0)
-
-    return StreamingResponse(
-        zip_buffer,
+    return FileResponse(
+        zip_path,
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=course_assets.zip"}
+        headers={"Content-Disposition": disposition, "X-Render-Id": render_id or ""},
+        background=BackgroundTask(_safe_remove, zip_path),
     )
 
-@app.function(image=image, secrets=[r2_secret, clerk_secret], timeout=600)
+
+# ---------------------------------------------------------------------------
+# Library (authenticated)
+# ---------------------------------------------------------------------------
+_PUBLIC_FIELDS = (
+    "id", "kind", "title", "voice", "voices", "language", "chars",
+    "duration_ms", "scenes", "size_bytes", "created_at",
+)
+
+
+def _require_library():
+    lib = get_library()
+    if lib is None:
+        raise ApiError(503, "Library is not configured")
+    return lib
+
+
+def _parse_render_id(render_id: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(render_id)
+    except (ValueError, AttributeError, TypeError):
+        raise ApiError(404, "Not found")
+
+
+def _library_item(row: dict) -> dict:
+    item = {k: row.get(k) for k in _PUBLIC_FIELDS}
+    item["audio_url"] = presign(row.get("audio_key"))
+    item["srt_url"] = presign(row.get("srt_key"))
+    item["vtt_url"] = presign(row.get("vtt_key"))
+    item["zip_url"] = presign(row.get("zip_key"))
+    return item
+
+
+def _db_unavailable(user_id: str, op: str, e: Exception) -> ApiError:
+    print(f"[user={user_id}] Library {op} failed: {type(e).__name__}")
+    return ApiError(503, "Library is temporarily unavailable")
+
+
+@web_app.get("/library")
+async def list_library(request: Request, user_id: str = Depends(require_user)):
+    lib = _require_library()
+    params = request.query_params
+
+    try:
+        limit = int(params.get("limit") or DEFAULT_PAGE_SIZE)
+    except ValueError:
+        raise ApiError(400, "Invalid limit")
+    limit = max(1, min(MAX_PAGE_SIZE, limit))
+
+    try:
+        cursor = parse_cursor(params.get("cursor"))
+    except ValueError:
+        raise ApiError(400, "Invalid cursor")
+
+    q = (params.get("q") or "").strip()[:200] or None
+    kind = (params.get("kind") or "").strip() or None
+    if kind is not None and kind not in KINDS:
+        raise ApiError(400, "Invalid kind (expected single, dialogue or docx)")
+
+    try:
+        rows, next_cursor = await lib.list(user_id, limit=limit, cursor=cursor, q=q, kind=kind)
+    except Exception as e:  # noqa: BLE001
+        raise _db_unavailable(user_id, "list", e)
+    return {"status": "success", "items": [_library_item(r) for r in rows], "next_cursor": next_cursor}
+
+
+@web_app.patch("/library/{render_id}")
+async def patch_library_item(render_id: str, request: Request, user_id: str = Depends(require_user)):
+    lib = _require_library()
+    rid = _parse_render_id(render_id)
+    body = await parse_json_body(request, LibraryPatch)
+    try:
+        row = await lib.update_title(user_id, rid, body.title)
+    except Exception as e:  # noqa: BLE001
+        raise _db_unavailable(user_id, "update", e)
+    if row is None:
+        raise ApiError(404, "Not found")
+    return {"status": "success", "item": _library_item(row)}
+
+
+@web_app.delete("/library/{render_id}")
+async def delete_library_item(render_id: str, user_id: str = Depends(require_user)):
+    lib = _require_library()
+    rid = _parse_render_id(render_id)
+    try:
+        row = await lib.get(user_id, rid)
+    except Exception as e:  # noqa: BLE001
+        raise _db_unavailable(user_id, "get", e)
+    if row is None:
+        raise ApiError(404, "Not found")
+
+    keys = [row[k] for k in ("audio_key", "srt_key", "vtt_key", "zip_key") if row.get(k)]
+    try:
+        await asyncio.to_thread(_delete_keys, keys)
+    except Exception as e:  # noqa: BLE001 - keep the row so the user can retry
+        print(f"[user={user_id}] R2 delete failed: {type(e).__name__}")
+        raise ApiError(502, "Failed to delete stored files, please try again")
+
+    try:
+        deleted = await lib.delete(user_id, rid)
+    except Exception as e:  # noqa: BLE001
+        raise _db_unavailable(user_id, "delete", e)
+    if not deleted:
+        raise ApiError(404, "Not found")
+    print(f"[user={user_id}] Library item deleted ({len(keys)} objects)")
+    return {"status": "success"}
+
+
+# ---------------------------------------------------------------------------
+# Public demo (no Clerk; Turnstile + rate limits)
+# ---------------------------------------------------------------------------
+_demo_limiter: RateLimiter | None = None
+
+
+def get_demo_limiter() -> RateLimiter:
+    global _demo_limiter
+    if _demo_limiter is None:
+        store = ModalDictStore(modal.Dict.from_name(DEMO_DICT_NAME, create_if_missing=True))
+        _demo_limiter = RateLimiter(store)
+    return _demo_limiter
+
+
+def _rate_limited(retry_after: int) -> JSONResponse:
+    return JSONResponse(
+        {"status": "error", "message": "Too many requests. Please try again later.", "retry_after": retry_after},
+        status_code=429,
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+@web_app.post("/demo")
+async def demo_endpoint(request: Request):
+    secret = turnstile_secret()
+    if not secret:
+        # Fail closed: without Turnstile the demo would be an open TTS proxy.
+        raise ApiError(503, "Demo is not configured")
+
+    item = await parse_json_body(request, DemoRequest)
+    ip = client_ip(request)
+
+    try:
+        limiter = get_demo_limiter()
+        retry_after = await limiter.check(ip)
+    except Exception as e:  # noqa: BLE001
+        print(f"/demo rate-limit store failed: {type(e).__name__}")
+        raise ApiError(503, "Demo is temporarily unavailable")
+    if retry_after:
+        return _rate_limited(retry_after)
+
+    if not await verify_turnstile(item.turnstile_token, None if ip == "unknown" else ip, secret):
+        raise ApiError(403, "Verification failed")
+
+    try:
+        retry_after = await limiter.acquire(ip)
+    except Exception as e:  # noqa: BLE001
+        print(f"/demo rate-limit store failed: {type(e).__name__}")
+        raise ApiError(503, "Demo is temporarily unavailable")
+    if retry_after:
+        return _rate_limited(retry_after)
+
+    try:
+        audio = await synthesize_plain(item.text, item.voice)
+    except Exception as e:  # noqa: BLE001
+        print(f"/demo synthesis failed: {type(e).__name__}: {e}")
+        raise ApiError(502, "Audio generation failed")
+
+    print(f"/demo: {len(item.text)} chars | Voice: {item.voice} | {len(audio)} bytes")
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+
+
+# scaledown_window=300: keep a warm container 5 min after the last request so the
+# studio/library stays snappy (costs idle container time; see README).
+@app.function(
+    image=image,
+    secrets=[r2_secret, clerk_secret, db_secret, turnstile_modal_secret],
+    timeout=600,
+    scaledown_window=300,
+)
+@modal.concurrent(max_inputs=10)
 @modal.asgi_app()
 def generate_speech():
     return web_app

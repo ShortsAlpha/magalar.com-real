@@ -2,21 +2,24 @@
 
 import Link from 'next/link';
 import { UserButton, useUser } from '@clerk/nextjs';
-import { AudioLines, FileText, MessagesSquare, type LucideIcon } from 'lucide-react';
+import { AudioLines, FileText, Library, MessagesSquare, type LucideIcon } from 'lucide-react';
 import { Logo } from '@/components/brand/Logo';
 import { userButtonAppearance } from '@/components/auth/appearance';
-import { cx, focusRing } from './ui';
+import { MAX_CHARS } from '@/lib/constants';
+import { LANGUAGE_COUNT, VOICE_COUNT } from '@/lib/voices';
+import { cx, focusRing, formatCount } from './ui';
 
-export type StudioMode = 'single' | 'dialogue' | 'docx';
+export type StudioMode = 'single' | 'dialogue' | 'docx' | 'library';
 
 export const STUDIO_MODES: { id: StudioMode; label: string; short: string; href: string; icon: LucideIcon }[] = [
     { id: 'single', label: 'Single voice', short: 'Single', href: '/studio', icon: AudioLines },
     { id: 'dialogue', label: 'Dialogue studio', short: 'Dialogue', href: '/studio?mode=dialogue', icon: MessagesSquare },
     { id: 'docx', label: 'DOCX Automator', short: 'DOCX', href: '/studio?mode=docx', icon: FileText },
+    { id: 'library', label: 'Library', short: 'Library', href: '/studio?mode=library', icon: Library },
 ];
 
 export function parseMode(value: string | null): StudioMode {
-    return value === 'dialogue' || value === 'docx' ? value : 'single';
+    return value === 'dialogue' || value === 'docx' || value === 'library' ? value : 'single';
 }
 
 function UserBlock() {
@@ -100,6 +103,19 @@ export default function AppSidebar({ mode }: { mode: StudioMode }) {
                     </ul>
                 </nav>
 
+                <dl className="mx-3 mb-4 space-y-2 rounded-lg border border-white/10 px-3 py-3">
+                    {[
+                        ['Voices', formatCount(VOICE_COUNT)],
+                        ['Languages', String(LANGUAGE_COUNT)],
+                        ['Per render', `${formatCount(MAX_CHARS)} chars`],
+                    ].map(([k, v]) => (
+                        <div key={k} className="flex items-center justify-between gap-2">
+                            <dt className="font-mono text-[10px] uppercase tracking-[0.14em] text-neutral-600">{k}</dt>
+                            <dd className="font-mono text-[10px] tabular-nums text-neutral-400">{v}</dd>
+                        </div>
+                    ))}
+                </dl>
+
                 <div className="border-t border-white/10 p-4">
                     <UserBlock />
                 </div>
@@ -123,7 +139,7 @@ export default function AppSidebar({ mode }: { mode: StudioMode }) {
                 aria-label="Studio modes"
                 className="fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-black pb-[env(safe-area-inset-bottom)] md:hidden"
             >
-                <ul className="grid grid-cols-3">
+                <ul className="grid grid-cols-4">
                     {STUDIO_MODES.map((m) => {
                         const active = m.id === mode;
                         const Icon = m.icon;
@@ -139,7 +155,7 @@ export default function AppSidebar({ mode }: { mode: StudioMode }) {
                                         active ? 'text-white' : 'text-neutral-500 hover:text-neutral-200',
                                     )}
                                 >
-                                    {active && <span aria-hidden className="absolute inset-x-6 top-0 h-px bg-white" />}
+                                    {active && <span aria-hidden className="absolute inset-x-5 top-0 h-px bg-white" />}
                                     <Icon className="h-[18px] w-[18px]" strokeWidth={1.75} aria-hidden />
                                     <span className="font-mono text-[10px] uppercase tracking-[0.12em]">{m.short}</span>
                                 </Link>

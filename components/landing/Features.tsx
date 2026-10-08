@@ -1,4 +1,16 @@
-import { AudioLines, FileArchive, MessagesSquare, ScrollText } from 'lucide-react';
+import type { CSSProperties } from 'react';
+import {
+  AudioLines,
+  Captions,
+  Download,
+  FileArchive,
+  Library,
+  MessagesSquare,
+  PenLine,
+  ScrollText,
+  Trash2,
+} from 'lucide-react';
+import { LANGUAGE_COUNT, VOICE_COUNT } from '@/lib/voices';
 import { Eyebrow, Split } from './Split';
 
 const FEATURES = [
@@ -6,16 +18,16 @@ const FEATURES = [
     n: '01',
     icon: AudioLines,
     title: 'Single voice',
-    body: 'Pick one of 23 natural English voices and preview it. Dial in speed, pitch and volume, preview the result, then generate an MP3 you can play in the browser and download.',
-    specs: ['23 voices', '0.5–2× speed', '±50 Hz pitch', '±50% volume'],
+    body: `Pick one of ${VOICE_COUNT} neural voices in ${LANGUAGE_COUNT} languages and preview it. Dial in speed, pitch and volume, then generate an MP3 you can play in the browser and download.`,
+    specs: [`${VOICE_COUNT} voices`, `${LANGUAGE_COUNT} languages`, '0.5–2× speed', '±50 Hz pitch'],
     art: 'single',
   },
   {
     n: '02',
     icon: MessagesSquare,
     title: 'Dialogue studio',
-    body: 'Build a script from blocks and give every block its own voice. Interviews, stories and explainers render as one continuous audio file.',
-    specs: ['Multi-speaker', 'Voice per block', 'One file'],
+    body: 'Build a script from blocks and give every block its own voice, even in different languages. Interviews, stories and explainers render as one continuous audio file.',
+    specs: ['Multi-speaker', 'Voice per block', 'Mixed languages', 'One file'],
     art: 'dialogue',
   },
   {
@@ -30,11 +42,44 @@ const FEATURES = [
     n: '04',
     icon: FileArchive,
     title: 'DOCX Automator',
-    body: 'Drop in one or many .docx scripts. Every scene is voiced, every embedded image is extracted, and each document comes back as its own ZIP.',
+    body: 'Drop in one or many .docx scripts. Every scene is voiced and subtitled, every embedded image is extracted, and each document comes back as its own ZIP.',
     specs: ['Batch queue', 'Scene parsing', 'ZIP per document'],
     art: 'docx',
   },
+  {
+    n: '05',
+    icon: Captions,
+    title: 'Subtitles',
+    body: 'Every render ships with SRT and VTT files, timed from the voice’s own word boundaries and broken into readable lines. Drop them into any editor or player.',
+    specs: ['SRT', 'VTT', 'Word-timed', 'Every render'],
+    art: 'subs',
+  },
+  {
+    n: '06',
+    icon: Library,
+    title: 'Personal library',
+    body: 'Every render is saved to your private library. Play it back, re-download the audio and subtitles, rename it or delete it. Files stay until you delete them.',
+    specs: ['Auto-saved', 'Re-download', 'Rename', 'Delete'],
+    art: 'library',
+  },
 ] as const;
+
+/* Deterministic bars for the subtitle vignette. */
+const SUB_BARS = Array.from({ length: 56 }, (_, i) => {
+  const v = Math.abs(Math.sin(i * 0.83) * 0.6 + Math.sin(i * 0.29 + 2) * 0.4);
+  const gap = i === 18 || i === 19 || i === 38 ? 0.12 : 1;
+  return Math.round(Math.max(0.1, (0.2 + v * 0.8) * gap) * 100);
+});
+const CUES = [
+  { t: 'Every word,', time: '00:00:00,120' },
+  { t: 'timed to the voice', time: '00:00:01,480' },
+  { t: 'that speaks it.', time: '00:00:03,060' },
+];
+const LIB = [
+  { name: 'launch-film.mp3', meta: 'Emel · tr-TR · 01:12' },
+  { name: 'chapter-one.mp3', meta: 'Sonia · en-GB · 08:41' },
+  { name: 'module-01.zip', meta: 'DOCX · 6 scenes' },
+];
 
 function Art({ kind }: { kind: (typeof FEATURES)[number]['art'] }) {
   if (kind === 'single') {
@@ -78,6 +123,50 @@ function Art({ kind }: { kind: (typeof FEATURES)[number]['art'] }) {
       </div>
     );
   }
+  if (kind === 'subs') {
+    return (
+      <div className="fa fa-subs" aria-hidden="true">
+        <span className="fa-sbars">
+          {SUB_BARS.map((h, i) => (
+            <i key={i} style={{ height: `${h}%` }} />
+          ))}
+          <span className="fa-shead" />
+        </span>
+        <span className="fa-cues">
+          {CUES.map((c, i) => (
+            <i key={i} style={{ '--c': i } as CSSProperties} />
+          ))}
+        </span>
+        <span className="fa-caption">
+          {CUES.map((c, i) => (
+            <span key={i} style={{ '--c': i } as CSSProperties}>
+              <small>{c.time}</small>
+              {c.t}
+            </span>
+          ))}
+        </span>
+      </div>
+    );
+  }
+  if (kind === 'library') {
+    return (
+      <div className="fa fa-lib" aria-hidden="true">
+        {LIB.map((r, i) => (
+          <span key={r.name} className="fa-row" style={{ '--c': i } as CSSProperties}>
+            <span className="fa-rname">
+              <b>{r.name}</b>
+              <small>{r.meta}</small>
+            </span>
+            <span className="fa-ricons">
+              <Download size={13} strokeWidth={1.75} />
+              <PenLine size={13} strokeWidth={1.75} />
+              <Trash2 size={13} strokeWidth={1.75} />
+            </span>
+          </span>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="fa fa-docx" aria-hidden="true">
       <span className="fa-doc">.docx</span>
@@ -95,11 +184,12 @@ export function Features() {
           <Eyebrow num="01">Features</Eyebrow>
           <h2 className="h2" id="features-title" data-split>
             <Split>
-              Four ways to give text a <em>voice.</em>
+              Every way to give text a <em>voice.</em>
             </Split>
           </h2>
           <p className="lede" data-reveal>
-            One studio for a single narrator, a full cast, a 50,000-character manuscript or a folder full of scripts.
+            One studio for a single narrator, a full cast, a 50,000-character manuscript or a folder full of scripts, with
+            subtitles and a library for everything you render.
           </p>
         </header>
 

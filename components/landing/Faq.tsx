@@ -1,14 +1,31 @@
 import { Plus } from 'lucide-react';
+import { LANGUAGE_COUNT, LOCALE_COUNT, VOICE_COUNT } from '@/lib/voices';
 import { Eyebrow, Split } from './Split';
 
 const FAQ = [
   {
-    q: 'How long can a single render be?',
-    a: 'Up to 50,000 characters. Long text is split at sentence boundaries, the chunks are synthesized in parallel, and the results are stitched back into one seamless MP3.',
+    q: 'Which languages and voices are available?',
+    a: `${VOICE_COUNT} natural neural voices across ${LANGUAGE_COUNT} languages and ${LOCALE_COUNT} locales: English, Turkish, German, French, Spanish, Japanese, Arabic, Hindi and many more, often with several regional accents. A handful of multilingual voices can read many languages in one consistent voice.`,
   },
   {
-    q: 'Which voices and languages are available?',
-    a: '23 natural English neural voices with American, British, Australian, Canadian and Irish accents. Magalar is English-only for now.',
+    q: 'Can I try it without an account?',
+    a: 'Yes. The demo near the top of the page renders up to 200 characters with any voice, no sign-up needed. It allows a few short tries per hour per visitor, and demo audio is never stored. A free account unlocks the full studio.',
+  },
+  {
+    q: 'How long can a single render be?',
+    a: 'Up to 50,000 characters. Long text is split at sentence boundaries (in any script, including Chinese, Japanese, Arabic and Hindi), the chunks are synthesized in parallel, and the results are stitched back into one seamless MP3.',
+  },
+  {
+    q: 'Do I get subtitles?',
+    a: 'Yes, with every render. You get an SRT and a VTT file built from the voice’s own word timings and split into readable lines of a few seconds each. Long-form and dialogue subtitles are timed against the final stitched MP3, and the DOCX Automator adds an .srt and a .vtt for every scene.',
+  },
+  {
+    q: 'What is the library?',
+    a: 'Every render is saved to your personal library automatically. Search it, play renders back, re-download the MP3, subtitles or ZIP, rename them or delete them. Only you can see your library.',
+  },
+  {
+    q: 'How long are my files kept?',
+    a: 'Until you delete them. Renders are stored privately on Cloudflare R2 and delivered through private download links that expire after an hour; a fresh link is created whenever you open your library. Deleting a render removes its audio, subtitles and ZIP.',
   },
   {
     q: 'What can I adjust?',
@@ -16,7 +33,7 @@ const FAQ = [
   },
   {
     q: 'What file formats do I get?',
-    a: 'Single-voice, long-form and dialogue renders come back as MP3s you can play in the browser and download. The DOCX Automator returns one ZIP per document, containing numbered MP3s and the extracted images.',
+    a: 'Single-voice, long-form and dialogue renders come back as an MP3 plus SRT and VTT subtitles. The DOCX Automator returns one ZIP per document, containing numbered MP3s, matching subtitle files and the extracted images.',
   },
   {
     q: 'How should I format a .docx for the Automator?',
@@ -24,15 +41,11 @@ const FAQ = [
   },
   {
     q: 'Can I use several voices in one file?',
-    a: 'Yes. In the dialogue studio you build a script from blocks, assign a voice to each block and render everything as one continuous audio file.',
+    a: 'Yes. In the dialogue studio you build a script from blocks, assign a voice to each block (in any language) and render everything as one continuous audio file with one set of subtitles.',
   },
   {
     q: 'Do I need an account? What does it cost?',
-    a: 'You need a free account to open the studio. Sign up with email or a social login. Magalar is free during early access.',
-  },
-  {
-    q: 'What happens to my files?',
-    a: 'Rendered audio is stored privately on Cloudflare R2 and delivered through private download links that expire. Rendering runs on serverless workers.',
+    a: 'You can try the demo without one. To open the studio, create a free account with email or a social login. Magalar is free during early access.',
   },
 ];
 
@@ -47,7 +60,9 @@ export function Faq() {
               Questions, <em>answered.</em>
             </Split>
           </h2>
-          <p className="lede">The short version: English voices, MP3 and ZIP out, up to 50,000 characters in.</p>
+          <p className="lede">
+            The short version: {LANGUAGE_COUNT} languages, MP3 with subtitles out, up to 50,000 characters in.
+          </p>
         </header>
         <div className="faq-list">
           {FAQ.map((f, i) => (

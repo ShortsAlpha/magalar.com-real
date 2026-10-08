@@ -1,15 +1,17 @@
-import { FileArchive, FileAudio, FileImage } from 'lucide-react';
+import { FileArchive, FileAudio, FileImage, FileText } from 'lucide-react';
 import { Eyebrow, Split } from './Split';
 import { Pipeline } from './Pipeline';
 
 const TREE = [
-  { name: '01.mp3', kind: 'audio', note: 'Scene 1' },
+  { name: '01.mp3', kind: 'audio', note: 'Scene 1 · audio' },
+  { name: '01.srt', kind: 'subs', note: 'Scene 1 · subtitles' },
+  { name: '01.vtt', kind: 'subs', note: 'Scene 1 · subtitles' },
   { name: '01_1.png', kind: 'image', note: 'Scene 1 · image 1' },
-  { name: '02.mp3', kind: 'audio', note: 'Scene 2' },
-  { name: '03.mp3', kind: 'audio', note: 'Scene 3' },
-  { name: '03_1.png', kind: 'image', note: 'Scene 3 · image 1' },
-  { name: '03_2.jpg', kind: 'image', note: 'Scene 3 · image 2' },
-  { name: '04.mp3', kind: 'audio', note: 'Scene 4' },
+  { name: '02.mp3', kind: 'audio', note: 'Scene 2 · audio' },
+  { name: '02.srt', kind: 'subs', note: 'Scene 2 · subtitles' },
+  { name: '02.vtt', kind: 'subs', note: 'Scene 2 · subtitles' },
+  { name: '03.mp3', kind: 'audio', note: 'Scene 3 · audio' },
+  { name: '03_1.jpg', kind: 'image', note: 'Scene 3 · image 1' },
 ] as const;
 
 export function Docx() {
@@ -25,7 +27,8 @@ export function Docx() {
           </h2>
           <p className="lede" data-reveal>
             Built for video, e-learning and slideshow production. Queue one or many .docx scripts: every scene is
-            voiced, every embedded image is pulled out, and each document returns as a tidy, numbered ZIP.
+            voiced and subtitled, every embedded image is pulled out, and each document returns as a tidy, numbered
+            ZIP that also waits in your library.
           </p>
         </header>
 
@@ -77,6 +80,8 @@ export function Docx() {
                     </span>
                     {f.kind === 'audio' ? (
                       <FileAudio size={15} strokeWidth={1.5} aria-hidden="true" />
+                    ) : f.kind === 'subs' ? (
+                      <FileText size={15} strokeWidth={1.5} aria-hidden="true" />
                     ) : (
                       <FileImage size={15} strokeWidth={1.5} aria-hidden="true" />
                     )}
@@ -93,8 +98,8 @@ export function Docx() {
               </ul>
             </div>
             <p className="panel-note">
-              Audio is numbered by scene. Images keep their scene number plus an index, so files drop straight onto a
-              timeline or a slide deck in order.
+              Audio and its SRT and VTT subtitles are numbered by scene. Images keep their scene number plus an index,
+              so files drop straight onto a timeline or a slide deck in order.
             </p>
           </figure>
         </div>

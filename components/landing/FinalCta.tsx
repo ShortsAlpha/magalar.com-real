@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { LANGUAGE_COUNT } from '@/lib/voices';
 import { AuthCta } from './AuthCta';
 import { Split } from './Split';
 
@@ -26,7 +27,7 @@ export function FinalCta() {
           </Link>
         </div>
         <p className="cta-note" data-reveal>
-          Email or social sign-in · 23 voices · No software to install
+          Email or social sign-in · {LANGUAGE_COUNT} languages · No software to install
         </p>
       </div>
     </section>

@@ -3,7 +3,7 @@ import { LongFormVisual } from './LongFormVisual';
 
 const SPECS = [
   { k: 'Limit', v: '50,000 characters per render' },
-  { k: 'Split', v: 'At sentence boundaries' },
+  { k: 'Split', v: 'At sentence boundaries, any script' },
   { k: 'Render', v: 'Chunks in parallel' },
   { k: 'Output', v: 'One seamless MP3' },
 ];

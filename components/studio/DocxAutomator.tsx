@@ -2,7 +2,13 @@
 
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
 import { ArrowDownToLine, ArrowRight, FileText, RotateCcw, Upload, X } from 'lucide-react';
-import { ApiError, toApiError, triggerDownload, useBackend } from '@/lib/api';
+import { DEFAULT_VOICE_ID, getVoiceById, previewTextFor, type Voice } from '@/lib/voices';
+import { ApiError, NEUTRAL_PROSODY, toApiError, toProsody, triggerDownload, useBackend } from '@/lib/api';
+import { invalidateLibrary } from '@/lib/studio-library';
+import { useStudioPrefs } from '@/lib/studio-prefs';
+import { formatBytes } from '@/lib/studio-format';
+import { cachedPreview, usePreview } from './usePreview';
+import { previewKey, VoicePicker } from './VoiceBrowser';
 import {
     ApiErrorNotice,
     buttonClass,
@@ -12,6 +18,8 @@ import {
     MonoLabel,
     Notice,
     PageHeader,
+    ProsodySliders,
+    SavedToLibrary,
 } from './ui';
 
 type FileStatus = 'pending' | 'processing' | 'done' | 'error';
@@ -22,21 +30,24 @@ interface QueueItem {
     status: FileStatus;
     error?: string;
     url?: string;
+    renderId?: string | null;
 }
 
 const zipName = (file: File) => `${file.name.replace(/\.docx$/i, '') || 'magalar'}.zip`;
-
-function formatSize(bytes: number) {
-    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
-}
 
 const newId = () =>
     typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `file-${Date.now()}-${Math.random()}`;
 
 export default function DocxAutomator() {
     const api = useBackend();
+    const preview = usePreview();
+    const prefs = useStudioPrefs();
     const [queue, setQueue] = useState<QueueItem[]>([]);
+    const [pickedVoiceId, setPickedVoiceId] = useState<string | null>(null);
+    const [speed, setSpeed] = useState(1);
+    const [pitch, setPitch] = useState(0);
+    const [volume, setVolume] = useState(0);
+    const [previewError, setPreviewError] = useState<ApiError | null>(null);
     const [isDragging, setIsDragging] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [skipped, setSkipped] = useState(0);
@@ -56,6 +67,35 @@ export default function DocxAutomator() {
         },
         [],
     );
+
+    // Last-used voice (from any mode) until the user picks one here.
+    const voiceId =
+        pickedVoiceId ?? (prefs.voiceId && getVoiceById(prefs.voiceId) ? prefs.voiceId : DEFAULT_VOICE_ID);
+    const settingsDirty = speed !== 1 || pitch !== 0 || volume !== 0;
+
+    const previewVoice = (voice: Voice) => {
+        const id = previewKey(voice.id);
+        if (preview.state?.id === id) {
+            preview.stop();
+            return;
+        }
+        const sample = previewTextFor(voice);
+        setPreviewError(null);
+        preview
+            .play(id, () =>
+                cachedPreview(`${voice.id}|${sample}`, async () =>
+                    (
+                        await api.generateSpeech({
+                            text: sample,
+                            voice: voice.id,
+                            ...NEUTRAL_PROSODY,
+                            save: false,
+                        })
+                    ).audioUrl,
+                ),
+            )
+            .catch((err) => setPreviewError(toApiError(err)));
+    };
 
     const patch = (id: string, update: Partial<QueueItem>) =>
         setQueue((prev) => prev.map((q) => (q.id === id ? { ...q, ...update } : q)));
@@ -91,7 +131,11 @@ export default function DocxAutomator() {
         if (isProcessing) return;
         setIsProcessing(true);
         setAuthError(null);
+        preview.stop();
         cancelRef.current = false;
+        // Settings are captured once per batch.
+        const options = { voice: voiceId, ...toProsody(speed, pitch, volume) };
+        let saved = false;
 
         const todo = queueRef.current.filter((q) => q.status === 'pending' || q.status === 'error');
         for (const item of todo) {
@@ -100,9 +144,10 @@ export default function DocxAutomator() {
             if (!queueRef.current.some((q) => q.id === item.id)) continue;
             patch(item.id, { status: 'processing', error: undefined });
             try {
-                const blob = await api.processDocx(item.file);
-                const url = URL.createObjectURL(blob);
-                patch(item.id, { status: 'done', url });
+                const res = await api.processDocx(item.file, options);
+                const url = URL.createObjectURL(res.blob);
+                patch(item.id, { status: 'done', url, renderId: res.renderId });
+                if (res.renderId) saved = true;
                 triggerDownload(url, zipName(item.file));
             } catch (err) {
                 const apiErr = toApiError(err);
@@ -113,6 +158,7 @@ export default function DocxAutomator() {
                 }
             }
         }
+        if (saved) invalidateLibrary();
         setIsProcessing(false);
     };
 
@@ -137,6 +183,7 @@ export default function DocxAutomator() {
 
     const runnable = queue.filter((q) => q.status === 'pending' || q.status === 'error').length;
     const doneCount = queue.filter((q) => q.status === 'done').length;
+    const lastSavedId = [...queue].reverse().find((q) => q.status === 'done' && q.renderId)?.renderId ?? null;
 
     return (
         <div className="mx-auto w-full max-w-4xl space-y-8">
@@ -144,8 +191,67 @@ export default function DocxAutomator() {
                 eyebrow="DOCX Automator"
                 title="Batch your"
                 accent="documents."
-                description="Drop course DOCX files. Each one is narrated scene by scene and returned as a ZIP of MP3s, processed one after another."
+                description="Drop course DOCX files. Each one is narrated scene by scene and returned as a ZIP with an MP3 plus SRT and VTT subtitles for every scene, processed one after another."
+                actions={lastSavedId ? <SavedToLibrary renderId={lastSavedId} /> : undefined}
             />
+
+            <section
+                aria-label="Narration settings"
+                className="grid grid-cols-1 gap-6 rounded-xl border border-white/10 bg-neutral-950 p-4 sm:p-5 md:grid-cols-12"
+            >
+                <div className="space-y-3 md:col-span-5">
+                    <div className="flex items-center justify-between">
+                        <MonoLabel className="text-neutral-300">Narrator</MonoLabel>
+                        <MonoLabel className="text-[10px] text-neutral-600">All scenes</MonoLabel>
+                    </div>
+                    <VoicePicker
+                        variant="field"
+                        value={voiceId}
+                        onChange={(v) => setPickedVoiceId(v.id)}
+                        label="DOCX narrator voice"
+                        onPreview={previewVoice}
+                        previewState={preview.state}
+                        disabled={isProcessing}
+                    />
+                    <p className="text-[13px] leading-relaxed text-neutral-500">
+                        Every scene is read in this voice — pick one that matches the document&apos;s language.
+                    </p>
+                </div>
+                <div className="space-y-6 md:col-span-7 md:border-l md:border-white/10 md:pl-6">
+                    <div className="flex items-center justify-between">
+                        <MonoLabel className="text-neutral-300">Voice settings</MonoLabel>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setSpeed(1);
+                                setPitch(0);
+                                setVolume(0);
+                            }}
+                            disabled={!settingsDirty || isProcessing}
+                            className={cx(
+                                'flex items-center gap-1 rounded font-mono text-[10px] uppercase tracking-[0.14em] text-neutral-500 transition-colors hover:text-white disabled:opacity-0',
+                                focusRing,
+                            )}
+                        >
+                            <RotateCcw className="h-3 w-3" aria-hidden />
+                            Reset
+                        </button>
+                    </div>
+                    <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
+                        <ProsodySliders
+                            idPrefix="docx"
+                            speed={speed}
+                            pitch={pitch}
+                            volume={volume}
+                            onSpeed={setSpeed}
+                            onPitch={setPitch}
+                            onVolume={setVolume}
+                            disabled={isProcessing}
+                        />
+                    </div>
+                </div>
+            </section>
+            <ApiErrorNotice error={previewError} />
 
             <div
                 role="button"
@@ -180,7 +286,7 @@ export default function DocxAutomator() {
                 </span>
                 <p className="text-[15px] font-medium text-white">{isDragging ? 'Release to add files' : 'Drop DOCX files here'}</p>
                 <p className="mt-1.5 text-sm text-neutral-500">or click to browse</p>
-                <MonoLabel className="mt-6">.docx → .zip · MP3 per scene</MonoLabel>
+                <MonoLabel className="mt-6">.docx → .zip · MP3 + SRT + VTT per scene</MonoLabel>
             </div>
 
             {skipped > 0 && (
@@ -218,7 +324,7 @@ export default function DocxAutomator() {
                                         {item.file.name}
                                     </p>
                                     <p className="mt-0.5 truncate font-mono text-[11px] tabular-nums text-neutral-500">
-                                        {formatSize(item.file.size)}
+                                        {formatBytes(item.file.size)}
                                         {item.status === 'error' && item.error && (
                                             <span className="text-red-400" title={item.error}>
                                                 {' '}
@@ -313,7 +419,7 @@ function StatusPill({ status }: { status: FileStatus }) {
     const map: Record<FileStatus, { label: string; className: string }> = {
         pending: { label: 'Queued', className: 'border-white/10 text-neutral-500' },
         processing: { label: 'Rendering', className: 'border-white/20 text-white' },
-        done: { label: 'Done', className: 'border-emerald-500/25 text-emerald-400' },
+        done: { label: 'Done', className: 'border-white/25 text-white' },
         error: { label: 'Failed', className: 'border-red-500/25 text-red-400' },
     };
     const { label, className } = map[status];

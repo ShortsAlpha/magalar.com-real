@@ -1,3 +1,4 @@
+import { LANGUAGE_COUNT, LOCALE_COUNT, VOICE_COUNT } from '@/lib/voices';
 import { AuthCta } from './AuthCta';
 import { HeroConsole } from './HeroConsole';
 
@@ -10,7 +11,9 @@ export function Hero() {
             <i className="rec-dot" aria-hidden="true" />
             Text to speech, studio grade
           </span>
-          <span className="hero-kicker-right">English · 5 accents · Neural voices</span>
+          <span className="hero-kicker-right">
+            {LANGUAGE_COUNT} languages · {LOCALE_COUNT} locales · Neural voices
+          </span>
         </div>
 
         <h1 className="hero-title" id="hero-title">
@@ -28,8 +31,9 @@ export function Hero() {
 
         <div className="hero-row">
           <p className="hero-sub hero-fade" style={{ animationDelay: '.35s' }}>
-            Magalar turns scripts into natural, studio-grade speech. One narrator or a full cast, a paragraph or a
-            50,000-character manuscript, a single file or a whole folder of .docx scripts.
+            Magalar turns scripts into natural, studio-grade speech in {LANGUAGE_COUNT} languages, with subtitles for
+            every render. One narrator or a full cast, a paragraph or a 50,000-character manuscript, a single file or a
+            whole folder of .docx scripts.
           </p>
           <div className="hero-actions hero-fade" style={{ animationDelay: '.45s' }}>
             <div className="hero-ctas">
@@ -39,14 +43,15 @@ export function Hero() {
                 className="btn btn-primary btn-lg"
                 magnetic
               />
-              <a href="#voices" className="btn btn-ghost btn-lg">
-                Hear the voices
+              <a href="#try" className="btn btn-ghost btn-lg">
+                Try it, no sign-up
               </a>
             </div>
             <p className="hero-specs">
-              <span>23 voices</span>
+              <span>{VOICE_COUNT} voices</span>
+              <span>{LANGUAGE_COUNT} languages</span>
               <span>50,000 characters</span>
-              <span>MP3 · ZIP</span>
+              <span>MP3 · SRT · VTT</span>
             </p>
           </div>
         </div>

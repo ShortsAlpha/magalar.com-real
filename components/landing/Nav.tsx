@@ -5,8 +5,10 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import { UserButton, useAuth } from '@clerk/nextjs';
 import { ArrowRight, ArrowUp } from 'lucide-react';
 import { Logo } from '@/components/brand/Logo';
+import { LANGUAGE_COUNT, VOICE_COUNT } from '@/lib/voices';
 
 export const NAV_LINKS = [
+  { href: '#try', label: 'Try it' },
   { href: '#features', label: 'Features' },
   { href: '#how-it-works', label: 'How it works' },
   { href: '#voices', label: 'Voices' },
@@ -221,7 +223,9 @@ export function Nav() {
               </Link>
             </>
           )}
-          <p className="mono-note">23 voices · 50,000 characters · MP3</p>
+          <p className="mono-note">
+            {VOICE_COUNT} voices · {LANGUAGE_COUNT} languages · MP3 · SRT
+          </p>
         </div>
       </div>
 

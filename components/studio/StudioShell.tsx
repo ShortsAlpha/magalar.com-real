@@ -5,10 +5,12 @@ import AppSidebar, { parseMode } from './AppSidebar';
 import SingleSpeakerMode from './SingleSpeakerMode';
 import MultiSpeakerMode from './MultiSpeakerMode';
 import DocxAutomator from './DocxAutomator';
+import LibraryMode from './LibraryMode';
 
 /**
  * Studio frame. The active mode lives in the URL (`/studio?mode=dialogue`) so it is linkable;
- * all three modes stay mounted so switching tabs never throws away a script in progress.
+ * every mode stays mounted so switching tabs never throws away a script in progress. The Library only
+ * fetches once it is first shown.
  */
 export default function StudioShell() {
     const mode = parseMode(useSearchParams().get('mode'));
@@ -26,6 +28,9 @@ export default function StudioShell() {
                     </div>
                     <div hidden={mode !== 'docx'}>
                         <DocxAutomator />
+                    </div>
+                    <div hidden={mode !== 'library'}>
+                        <LibraryMode active={mode === 'library'} />
                     </div>
                 </div>
             </main>
