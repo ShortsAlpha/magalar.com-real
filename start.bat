@@ -1,27 +1,22 @@
 @echo off
-title Magalar - local server
+title Magalar - dev server
 cd /d "%~dp0"
 echo.
-echo   Magalar  -  starting local server on http://localhost:8000
+echo   Magalar  -  starting dev server on http://localhost:3000
 echo   Press Ctrl+C to stop.
 echo.
-start "" http://localhost:8000
-
-where python >nul 2>nul
-if %errorlevel%==0 (
-  python -m http.server 8000
-  goto :eof
+where npm >nul 2>nul
+if not %errorlevel%==0 (
+  echo   Node.js not found. Install it from https://nodejs.org
+  pause
+  exit /b
 )
-where py >nul 2>nul
-if %errorlevel%==0 (
-  py -m http.server 8000
-  goto :eof
+if not exist "node_modules" call npm install
+if not exist ".env.local" (
+  copy .env.example .env.local >nul
+  echo   Created .env.local from .env.example - fill in your Clerk keys, then run start.bat again.
+  pause
+  exit /b
 )
-where npx >nul 2>nul
-if %errorlevel%==0 (
-  npx --yes serve -l 8000 .
-  goto :eof
-)
-echo   No Python or Node found. Install Python from https://python.org (tick "Add to PATH")
-echo   or simply double-click index.html to open the site directly.
-pause
+start "" http://localhost:3000
+npm run dev
